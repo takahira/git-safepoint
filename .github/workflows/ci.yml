@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Unit tests (${{ matrix.os }}, py ${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      # 3.9 は pyproject の下限互換、3.14 は現行系の確認。POSIX/FS 依存
+      # (flock・inode・exec-bit・symlink) を macOS でも検証する (review O)。
+      # macOS は現行 Python のみ（arm64 の 3.9 プロビジョニング回避）。
+      matrix:
+        os: [ubuntu-latest]
+        python: ["3.9", "3.14"]
+        include:
+          - os: macos-latest
+            python: "3.14"
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python }}
+      # 標準ライブラリのみ・依存ゼロ。リポ root から discover でパッケージを解決。
+      - name: unittest
+        run: python -m unittest discover -s tests -p "test_*.py" -t .

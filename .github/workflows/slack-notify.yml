@@ -1,0 +1,39 @@
+name: Slack on failure
+
+# CI ワークフローが「失敗」で終わった時だけ #github-ci に通知する。
+# 公式 Slack アプリの workflows 購読は成功も鳴る（失敗のみ不可）ため、
+# workflow_run + if(conclusion == failure) で失敗時のみに絞る。
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+
+permissions:
+  contents: read
+
+jobs:
+  notify:
+    # Only the canonical repo: this routes to the maintainer's personal #github-ci
+    # webhook, so forks never run it even if they happen to set the secret.
+    if: ${{ github.repository == 'takahira/git-safepoint' && github.event.workflow_run.conclusion == 'failure' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Notify Slack
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          REPO: ${{ github.repository }}
+          WF: ${{ github.event.workflow_run.name }}
+          BRANCH: ${{ github.event.workflow_run.head_branch }}
+          TITLE: ${{ github.event.workflow_run.display_title }}
+          ACTOR: ${{ github.event.workflow_run.actor.login }}
+          RUN_URL: ${{ github.event.workflow_run.html_url }}
+          RUN_NO: ${{ github.event.workflow_run.run_number }}
+        run: |
+          if [ -z "$SLACK_WEBHOOK_URL" ]; then
+            echo "SLACK_WEBHOOK_URL not set; skipping"; exit 0
+          fi
+          payload=$(jq -n \
+            --arg repo "$REPO" --arg wf "$WF" --arg branch "$BRANCH" \
+            --arg title "$TITLE" --arg actor "$ACTOR" --arg url "$RUN_URL" --arg no "$RUN_NO" \
+            '{text: ":red_circle: *CI failed* — `\($repo)` (\($branch)) / \($wf) #\($no)\n\($title)\n<\($url)|View run> · @\($actor)"}')
+          curl -sS -X POST -H 'Content-type: application/json' --data "$payload" "$SLACK_WEBHOOK_URL"

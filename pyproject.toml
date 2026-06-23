@@ -1,0 +1,70 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "git-safepoint"
+description = "Work-tree snapshot safety net: untracked-safe capture + selective restore via git plumbing"
+readme = "README.md"
+requires-python = ">=3.9"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Takayoshi Hirano" }]
+keywords = [
+    "git",
+    "snapshot",
+    "backup",
+    "restore",
+    "recovery",
+    "safety-net",
+    "undo",
+    "checkpoint",
+    "untracked",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Software Development :: Version Control :: Git",
+    "Topic :: System :: Archiving :: Backup",
+]
+# Zero runtime dependencies on purpose: standard library only (Python 3.9+).
+dependencies = []
+dynamic = ["version"]
+
+[project.scripts]
+git-safepoint = "git_safepoint.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/takahira/git-safepoint"
+Repository = "https://github.com/takahira/git-safepoint"
+Issues = "https://github.com/takahira/git-safepoint/issues"
+
+# Single source of truth for the version: git_safepoint/__init__.py __version__.
+[tool.hatch.version]
+path = "git_safepoint/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["git_safepoint"]
+
+[tool.hatch.build.targets.sdist]
+# Ship the importable package plus the standalone entry-point shim (referenced by
+# the README as ``python3 git_safepoint.py`` and by the zsh adapter), the trigger
+# adapter templates and tests.
+include = [
+    "git_safepoint/",
+    "git_safepoint.py",
+    "adapters/",
+    "tests/",
+    "README.md",
+    "LICENSE",
+]

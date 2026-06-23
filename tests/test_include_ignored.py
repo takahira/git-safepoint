@@ -183,7 +183,7 @@ class ListWorktreeFilesTest(unittest.TestCase):
 class PreexecIncludeIgnoredEnvTest(unittest.TestCase):
     """The snapshot subcommand (preexec path) honours the opt-in env."""
 
-    _KEYS = ("GIT_SAFEPOINT_INCLUDE_IGNORED", "SNAPNET_INCLUDE_IGNORED")
+    _KEYS = ("GIT_SAFEPOINT_INCLUDE_IGNORED",)
 
     def setUp(self):
         self.repo = helpers.make_repo()
@@ -222,9 +222,9 @@ class PreexecIncludeIgnoredEnvTest(unittest.TestCase):
 
 
 class IncludeIgnoredEnvTest(unittest.TestCase):
-    """Q: new env var name, with the legacy one still honoured."""
+    """The opt-in env var name for capturing ignored artifacts."""
 
-    _KEYS = ("GIT_SAFEPOINT_INCLUDE_IGNORED", "SNAPNET_INCLUDE_IGNORED")
+    _KEYS = ("GIT_SAFEPOINT_INCLUDE_IGNORED",)
 
     def setUp(self):
         self._saved = {k: os.environ.pop(k, None) for k in self._KEYS}
@@ -239,15 +239,6 @@ class IncludeIgnoredEnvTest(unittest.TestCase):
     def test_new_name(self):
         os.environ["GIT_SAFEPOINT_INCLUDE_IGNORED"] = "output/:dist/"
         self.assertEqual(cli._include_ignored_from_env(), ["output/", "dist/"])
-
-    def test_legacy_name_still_honoured(self):
-        os.environ["SNAPNET_INCLUDE_IGNORED"] = "build/"
-        self.assertEqual(cli._include_ignored_from_env(), ["build/"])
-
-    def test_new_name_takes_precedence(self):
-        os.environ["GIT_SAFEPOINT_INCLUDE_IGNORED"] = "new/"
-        os.environ["SNAPNET_INCLUDE_IGNORED"] = "old/"
-        self.assertEqual(cli._include_ignored_from_env(), ["new/"])
 
     def test_unset_returns_none(self):
         self.assertIsNone(cli._include_ignored_from_env())

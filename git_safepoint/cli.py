@@ -29,14 +29,9 @@ def _include_ignored_from_env() -> Optional[List[str]]:
     ``GIT_SAFEPOINT_INCLUDE_IGNORED`` is a ``:`` (or ``,``) separated list, e.g.
     ``output/:dist/``. Hooks have no CLI flags, so this is how a user opts in
     to capturing ignored artifacts through Claude Code / zsh preexec. Secret
-    patterns are still always excluded downstream. The legacy ``SNAPNET_*`` name
-    is still honoured for backward compatibility.
+    patterns are still always excluded downstream.
     """
-    raw = (
-        os.environ.get("GIT_SAFEPOINT_INCLUDE_IGNORED")
-        or os.environ.get("SNAPNET_INCLUDE_IGNORED")  # legacy name
-        or ""
-    ).strip()
+    raw = (os.environ.get("GIT_SAFEPOINT_INCLUDE_IGNORED") or "").strip()
     if not raw:
         return None
     parts = [p.strip() for chunk in raw.split(":") for p in chunk.split(",")]

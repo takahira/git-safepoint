@@ -142,7 +142,7 @@ Reload your Claude Code window. The hook fires before every Bash, Write, Edit, a
 - **Fail-open**: always exits 0 — the safety net never blocks the agent
 - Detects git repos from command paths when `cwd` is outside any repo
 
-Hooks take no CLI flags, so to also capture `.gitignore`'d build artifacts through the hook/preexec path, export a `:`-separated allow-list — e.g. `export GIT_SAFEPOINT_INCLUDE_IGNORED='output/:dist/'`. Secrets stay excluded even then.
+Hooks take no CLI flags. To **also capture `.gitignore`'d build artifacts** through them, set `GIT_SAFEPOINT_INCLUDE_IGNORED` — see [Configuration](#configuration-environment-variables). (Secrets stay excluded regardless.)
 
 Live-verified with the Claude Code VSCode extension (June 2026).
 
@@ -156,6 +156,26 @@ source /abs/path/to/git-safepoint/adapters/git-safepoint-preexec.zsh
 ```
 
 Snapshots before destructive shell commands (`rm`, `mv`, `git reset --hard`, etc.).
+
+---
+
+## Configuration (environment variables)
+
+No config file — these optional environment variables tune behaviour. The first
+is the one most people want: **the hook and `preexec` adapters take no CLI flags,
+so capturing `.gitignore`'d build artifacts through them is opt-in here.**
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `GIT_SAFEPOINT_INCLUDE_IGNORED` | *(unset)* | `:`- (or `,`-) separated allow-list of otherwise-`.gitignore`'d paths to **also** capture through the **hook / preexec** path — e.g. `'output/:dist/'`. The secret floor still applies, so credentials stay excluded even here. (From the CLI, use `--include-ignored` instead.) |
+| `GIT_SAFEPOINT_GIT_TIMEOUT` | `120` | Timeout (seconds) for each git invocation. |
+| `GIT_SAFEPOINT_GC_TIMEOUT` | `600` | Timeout (seconds) for the `prune` gc step. |
+| `GIT_SAFEPOINT_RESTORE_TIMEOUT` | `3600` | Timeout (seconds) for restore git operations. |
+| `GIT_SAFEPOINT_PY` | *(unset)* | Absolute path to `git_safepoint.py` for the zsh `preexec` adapter (see [zsh preexec](#zsh-preexec-auto-capture-before-terminal-commands)). |
+
+> **`.gitignore`'d build artifacts not being snapshotted?** That's by design — set
+> `GIT_SAFEPOINT_INCLUDE_IGNORED` (hook / preexec) or pass `--include-ignored` (CLI).
+> Secrets are never captured either way.
 
 ---
 

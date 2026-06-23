@@ -6,6 +6,7 @@ Captures tracked + untracked files before every destructive command, and lets
 you restore just the file you lost. No cloud. No accounts. Standard library
 only. Touches neither your index nor HEAD.
 
+[![PyPI](https://img.shields.io/pypi/v/git-safepoint.svg)](https://pypi.org/project/git-safepoint/)
 [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue.svg)](https://www.python.org)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey.svg)](https://github.com/takahira/git-safepoint)
@@ -52,9 +53,12 @@ git-safepoint is the only tool we're aware of that satisfies all four simultaneo
 Zero runtime dependencies — standard library only, Python 3.9+.
 
 ```sh
-# Recommended: install the `git-safepoint` command (pipx keeps it isolated)
+# Recommended: install from PyPI (pipx keeps it isolated)
+pipx install git-safepoint
+#   ... or:  pip install git-safepoint
+
+# Bleeding edge, straight from GitHub:
 pipx install git+https://github.com/takahira/git-safepoint
-#   ... or:  pip install git+https://github.com/takahira/git-safepoint
 
 # Or run from a clone without installing (also gives you the adapters/ hooks)
 git clone https://github.com/takahira/git-safepoint
@@ -275,7 +279,7 @@ MVP — full test suite passing (see [Running tests](#running-tests)), live in C
 
 **Implemented**: snapshot engine (tracked + untracked + opt-in .gitignore'd), secret exclusion (tracked files exempt), incremental capture, debounce + tree-SHA dedup, collision-free IDs across concurrent processes, staged-index variant capture (`restore --staged`), single-file / subtree / all / interactive restore, diff, GC/prune, Claude Code PreToolUse hook (conservative mode, live-verified), zsh preexec adapter.
 
-**Not yet**: PyPI package, daemon mode (fswatch / kqueue), interactive TUI, off-`.git` mirror.
+**Not yet**: daemon mode (fswatch / kqueue), interactive TUI, off-`.git` mirror.
 
 ---
 

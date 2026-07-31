@@ -58,7 +58,6 @@ DEFAULT_SECRET_PATTERNS: List[str] = [
     "credentials",
     ".netrc",
     ".pgpass",
-    "*.crt",
     "secring.*",
     # --- additions: common high-value credential filenames. The
     # floor is name-based and conservative; an over-broad glob only drops an
@@ -74,6 +73,15 @@ DEFAULT_SECRET_PATTERNS: List[str] = [
     "*.ovpn",                    # OpenVPN profile (often embeds keys)
     "*.gpg",                     # PGP key material / encrypted secrets
     "*.asc",                     # ASCII-armored PGP keys
+    # NOTE on certificates. `*.crt` / `*.cer` / `*.der` / `*.p7b` / `*.csr` were
+    # listed here and have been REMOVED: they are public material by construction
+    # (a certificate is what you hand out; a CSR is what you send to a CA). Per this
+    # module's own stated trade-off -- "dropping an untracked file IS a protection
+    # gap ... not a free 'never data loss'" -- excluding them paid that cost for
+    # zero secrecy benefit. `*.pem` STAYS: it is genuinely ambiguous and routinely
+    # holds a private key. `*.asc` also stays: it is most often a detached
+    # signature, but an ASCII-armored SECRET key export uses the same extension and
+    # that asymmetry (leak a key vs. skip a signature file) justifies keeping it.
     "*.tfvars",                  # Terraform variables (often secrets)
     "*.tfstate",                 # Terraform state (contains secrets)
     "*.tfstate.*",               # Terraform state backups
@@ -99,10 +107,6 @@ DEFAULT_SECRET_PATTERNS: List[str] = [
     "secrets.y*ml",              # secrets.yaml / secrets.yml
     "*.tfvars.json",             # Terraform vars (JSON form; *.tfvars misses it)
     "database.yml",              # Rails DB config (DB credentials)
-    "*.cer",                     # certificate (sibling of *.crt)
-    "*.der",                     # DER-encoded key/cert
-    "*.p7b",                     # PKCS#7 cert bundle
-    "*.csr",                     # certificate signing request
     ".htpasswd",                 # Apache basic-auth hashes
     "*.kdbx",                    # KeePass database
     "authorized_keys",           # SSH authorized keys

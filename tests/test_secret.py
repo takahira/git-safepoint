@@ -87,7 +87,7 @@ class SecretBackupDerivativesTest(unittest.TestCase):
     def test_backup_and_swap_copies_are_secret(self):
         for n in (
             ".env~", "#.env#", "id_rsa.bak", "id_rsa~", "id_rsa.orig",
-            "server.pem.bak", "server.pem~", "app.key.bak", "cert.crt.bak",
+            "server.pem.bak", "server.pem~", "app.key.bak", "store.p12.bak",
             ".netrc.bak", ".npmrc.bak", "database.yml.bak", "kubeconfig.bak",
             "id_ed25519.swp", "secrets/server.pem.save",
         ):
@@ -233,10 +233,21 @@ class SecretFloor(unittest.TestCase):
             "aws_credentials", "git-credentials", "credentials.json",
             "credentials.yml", "client_secret_12345.json", "secrets.yaml",
             "secrets.yml", "prod.tfvars.json", "terraform.tfvars.json",
-            "config/database.yml", "app.cer", "app.der", "bundle.p7b",
-            "request.csr", ".htpasswd", "vault.kdbx",
+            "config/database.yml", ".htpasswd", "vault.kdbx",
             ".ssh/authorized_keys", "wp-config.php",
         ):
+            self.assertTrue(secret.is_secret(name), name)
+
+    def test_public_certificate_material_is_not_secret(self):
+        # A certificate / CSR is public by construction: it is what you hand out.
+        # This module states that dropping an untracked file IS a protection gap,
+        # so excluding public material costs coverage for zero secrecy benefit.
+        # `*.pem` and `*.asc` deliberately stay secret -- both routinely carry a
+        # PRIVATE key, and leaking a key is worse than skipping a signature file.
+        for name in ("server.crt", "ca.cer", "cert.der", "bundle.p7b", "request.csr",
+                     "chain.crt.bak", "certs/app.cer"):
+            self.assertFalse(secret.is_secret(name), name)
+        for name in ("server.pem", "secret.asc", "key.p12", "id_rsa"):
             self.assertTrue(secret.is_secret(name), name)
 
     def test_review_d_does_not_overmatch_source_dirs(self):

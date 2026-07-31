@@ -20,6 +20,7 @@ from contextlib import contextmanager
 from typing import Dict, Iterator, List, Optional, Tuple
 
 from . import gitutil, ids, secret
+from .labelsecret import redact_label
 from .lock import LockBusy, RepoLock
 from .mtimecache import MtimeCache
 
@@ -451,9 +452,20 @@ def _capture_locked(
         if (not _signature_changed(repo, cache, files) and not deleted_pending
                 and not _index_changed(snap, cache)
                 and _recorded_snapshot_present(repo, cache)):
+            reason = "debounced (no change since last snapshot)"
+            if label:
+                # Same courtesy as the identical-tree dedup path below: a --label is
+                # a deliberate bookmark, so dropping it silently fails the user
+                # exactly when they reached for the feature. The README's first
+                # Quick start example is a labelled snapshot, which lands here
+                # whenever nothing changed.
+                reason += (
+                    "; label not recorded -- re-run with --force to bookmark "
+                    "the unchanged tree"
+                )
             return SnapshotResult(
                 1,
-                reason="debounced (no change since last snapshot)",
+                reason=reason,
                 elapsed_ms=(time.time() - t0) * 1000,
             )
 
@@ -852,7 +864,13 @@ def _staged_variant_tree(repo: str, snap: str) -> Optional[str]:
 def _make_message(snap_id: str, label: Optional[str], via: str) -> str:
     msg = "snapshot {0}".format(snap_id)
     if label:
-        flat = label.replace("\n", " ")
+        # Mask inline credentials BEFORE truncating. Both adapters put the triggering
+        # command straight into the label, so a label routinely carries
+        # ``export TOKEN=…`` / ``-p<password>`` / ``Authorization: …`` -- and this
+        # string becomes the commit subject, i.e. it lands in the object store that
+        # secret.py works to keep clean. Masking here (not in the adapters) covers
+        # preexec, the hook subcommand and a hand-written --label alike.
+        flat = redact_label(label).replace("\n", " ")
         # Signal truncation with an ellipsis so a clipped label is recognisable as
         # clipped. Total stays <= LABEL_MAX so snapshot_meta's
         # ``(...)`` parsing and the commit subject stay bounded.

@@ -12,7 +12,7 @@ inode]) of the work tree against the last snapshot's. Already proven elsewhere:
 What those leave open is the *structural* dimensions: a file ADDED or REMOVED
 within the debounce window changes the signature SET (not any single file's
 content) and must still defeat the debounce. This module closes that gap so the
-"変化判定" claim is backed end to end, not only for in-place content edits.
+change-detection claim is backed end to end, not only for in-place content edits.
 """
 import os
 import unittest

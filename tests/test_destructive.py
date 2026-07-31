@@ -160,7 +160,7 @@ class DestructiveKnownGaps(unittest.TestCase):
     """Documented misses of the head-verb allowlist.
 
     These are NOT detected. The allowlist trades these misses for a near-zero
-    false-positive rate; the README "既知の取りこぼし" section states the same
+    false-positive rate; the README "Known limitations" section states the same
     honestly. Pinning them as tests keeps the gap visible and guards against a
     silent behaviour change (a future fix would flip these to assertTrue).
     """

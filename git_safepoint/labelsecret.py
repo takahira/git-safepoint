@@ -50,10 +50,16 @@ _RULES: List[Tuple[re.Pattern, int]] = [
     # sshpass -p<pass>; mysql/mariadb/mongosh -p; redis-cli -a. Scoped on purpose:
     # ``docker -p`` is a port and ``psql -p`` is a port. The span from the tool name
     # to the flag is captured so the audit value (what ran, where it connected) is
-    # kept -- masking must not eat the command name.
+    # kept -- masking must not eat the command name. The -p/-a value is either a
+    # QUOTED string ('...' / "...") or a bare run that must start alnum so a bare
+    # ``-p -e ...`` (prompt form) does not mask the next flag. The quoted
+    # alternatives matter: ``-p'Hunter2'`` passed through UNmasked before they
+    # were added, because the bare form rejects a leading quote.
     (re.compile(r"(?i)(\bsshpass\b[^\n]{0,120}?\s-p)\s*([^\s;|&]+)"), 1),
-    (re.compile(r"(?i)(\b(?:mysql|mysqldump|mariadb|mongosh)\b[^\n]{0,300}?\s-p)\s*([A-Za-z0-9][^\s;|&]*)"), 1),
-    (re.compile(r"(?i)(\bredis-cli\b[^\n]{0,300}?\s-a)\s*([A-Za-z0-9][^\s;|&]*)"), 1),
+    (re.compile(r"(?i)(\b(?:mysql|mysqldump|mariadb|mongosh)\b[^\n]{0,300}?\s-p)\s*"
+                r"('[^']*'|\"[^\"]*\"|[A-Za-z0-9][^\s;|&]*)"), 1),
+    (re.compile(r"(?i)(\bredis-cli\b[^\n]{0,300}?\s-a)\s*"
+                r"('[^']*'|\"[^\"]*\"|[A-Za-z0-9][^\s;|&]*)"), 1),
     # curl basic auth: -u user:pass / --user user:pass (colon shape required).
     (re.compile(r"(?i)((?:^|\s)(?:-u\s*|--user[=\s]\s*)[^\s:;|&]+:)([^\s;|&]+)"), 1),
 ]

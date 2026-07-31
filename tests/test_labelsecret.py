@@ -37,11 +37,28 @@ class TestRedactLabel(unittest.TestCase):
             for token in keep:
                 self.assertIn(token, out, "{0!r} lost {1!r} -> {2!r}".format(text, token, out))
 
+    def test_short_db_flag_masks_quoted_values(self):
+        # Quoted values passed straight through before the '...'/"..." alternatives
+        # were added to the mysql -p / redis-cli -a rules: the bare-value form
+        # requires a leading alnum, and a quote is not one, so `-p'Hunter2'`
+        # leaked verbatim (cf. agent-trail's identical fix).
+        for text, leaked in (
+            ("mysql -uroot -p'Hunter2' db", "Hunter2"),
+            ('mysql -uroot -p"Hunter2" db', "Hunter2"),
+            ("mysqldump -uadmin -p 'sp aced' mydb", "sp aced"),
+            ('redis-cli -h 10.0.0.1 -a "S3cr3t pass" ping', "S3cr3t"),
+            ("redis-cli -a 'MyRedisPw' ping", "MyRedisPw"),
+        ):
+            out = redact_label(text)
+            self.assertNotIn(leaked, out, text)
+            self.assertIn(MASK, out, text)
+
     def test_ordinary_commands_are_untouched(self):
         for text in (
             "pre-bash: git status",
             "docker run -p 8080:80 nginx",
             "psql -p 5432 mydb",
+            "mysql -uroot -p -e 'select 1' db",   # prompt form: -p has no value
             "before refactor",
             "npm run build -- --mode production",
         ):

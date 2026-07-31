@@ -5,10 +5,11 @@ the commit subject -- i.e. it is persisted in refs/snapshots/* and printed by `l
 secret.py only covers filenames, so without this the most common credential carrier
 (the command line) went in verbatim.
 """
+import time
 import unittest
 
 from git_safepoint.engine import _make_message
-from git_safepoint.labelsecret import MASK, redact_label
+from git_safepoint.labelsecret import _REDACT_BOUND, MASK, redact_label
 
 
 class TestRedactLabel(unittest.TestCase):
@@ -55,6 +56,61 @@ class TestRedactLabel(unittest.TestCase):
     def test_message_without_label_is_unchanged(self):
         msg = _make_message("20260101-000000-0001-00001", None, "manual")
         self.assertEqual(msg, "snapshot 20260101-000000-0001-00001 via=manual")
+
+
+class TestRedactLabelIsBounded(unittest.TestCase):
+    """The pre-Bash hook passes the WHOLE command as the label, so redact_label
+    must stay fast on huge input -- a stalled hook means NO protective snapshot
+    before a destructive command, defeating the tool's whole purpose.
+    """
+
+    def test_16kb_alphanumeric_label_redacts_fast(self):
+        # A long unbroken alphanumeric run is the worst case for the (formerly
+        # unbounded) _KV_RE / _URL_CRED_RE leading runs: ~7s before the fix.
+        label = "pre-bash: " + "a" * 16000
+        start = time.perf_counter()
+        out = redact_label(label)
+        elapsed = time.perf_counter() - start
+        self.assertLess(elapsed, 0.05, "16KB label took {0:.3f}s".format(elapsed))
+        self.assertTrue(out.startswith("pre-bash: aaaa"))
+
+    def test_multi_megabyte_label_redacts_fast(self):
+        # Even linear regex passes over megabytes would stall the hook; the input
+        # cap keeps the pass O(_REDACT_BOUND) regardless of command size.
+        label = "pre-bash: " + ("echo hello && " * 150000)
+        start = time.perf_counter()
+        redact_label(label)
+        elapsed = time.perf_counter() - start
+        self.assertLess(elapsed, 0.1, "2MB label took {0:.3f}s".format(elapsed))
+
+    def test_secret_in_head_of_huge_label_is_still_masked(self):
+        # Capping the input must not weaken masking of what actually gets stored.
+        label = "export GITHUB_TOKEN=ghp_FAKEabc123456789 && " + "x" * 50000
+        out = redact_label(label)
+        self.assertNotIn("ghp_FAKEabc123456789", out)
+        self.assertIn(MASK, out)
+
+    def test_secret_straddling_label_max_is_masked_whole(self):
+        # LABEL_MAX is 60; start the token just before it so it straddles the
+        # stored-prefix boundary. Redaction runs over the capped window (far wider
+        # than LABEL_MAX), so the mask covers the token as a whole.
+        label = "x" * 55 + " ghp_FAKEabc123456789 " + "y" * 20000
+        msg = _make_message("20260101-000000-0001-00001", label, "hook")
+        self.assertNotIn("ghp_FAKE", msg)
+
+    def test_pem_sheared_by_the_cap_is_masked(self):
+        # A PEM whose END marker lies beyond the cap must not leak key body via
+        # the "no END, no match" escape hatch of the paired-marker rule.
+        pem = "-----BEGIN RSA PRIVATE KEY-----\n" + "A" * (_REDACT_BOUND * 2)
+        out = redact_label("deploy: " + pem)
+        self.assertNotIn("AAAA", out)
+        self.assertIn(MASK, out)
+
+    def test_short_unterminated_pem_marker_stays_visible(self):
+        # The open-ended PEM rule applies only to capped input: a stray BEGIN
+        # marker in a normal-sized label is not credential material.
+        label = "grep -----BEGIN RSA PRIVATE KEY----- notes.txt"
+        self.assertEqual(redact_label(label), label)
 
 
 class TestCertificatesAreNotTreatedAsSecrets(unittest.TestCase):

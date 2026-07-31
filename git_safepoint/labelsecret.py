@@ -59,14 +59,20 @@ _RULES: List[Tuple[re.Pattern, int]] = [
 ]
 
 # KEY=VALUE / KEY: VALUE with a credential-shaped key. Handled separately so the
-# scheme-word skip above can apply.
+# scheme-word skip above can apply. The runs around the keyword are BOUNDED
+# ({0,40}, mirroring agent-trail's KV_SECRET_RE): an unbounded leading run makes
+# the engine rescan a long alphanumeric stretch from every start position --
+# quadratic on exactly the input ``hook`` produces (a whole Bash command as the
+# label). Real env-var / flag names fit comfortably in 40 chars.
 _KV_RE = re.compile(
-    r"(?i)([A-Za-z0-9_.-]*"
+    r"(?i)([A-Za-z0-9_.-]{0,40}"
     r"(?:passwd|password|secret|token|api[_-]?key|access[_-]?key|auth|credential|private[_-]?key)"
-    r"[A-Za-z0-9_.-]*\s*[:=]\s*)(\"[^\"]*\"|'[^']*'|[^\s;|&]+)")
+    r"[A-Za-z0-9_.-]{0,40}\s*[:=]\s*)(\"[^\"]*\"|'[^']*'|[^\s;|&]+)")
 
-# scheme://user:pass@host -- mask only the password, keep user and host.
-_URL_CRED_RE = re.compile(r"([a-zA-Z][a-zA-Z0-9+.-]*://[^\s:@/]*:)([^\s@/]+)(@)")
+# scheme://user:pass@host -- mask only the password, keep user and host. The scheme
+# run is bounded ({0,15}, mirroring agent-trail's URL_CRED_RE) for the same
+# quadratic-rescan reason as _KV_RE; no real URI scheme is longer.
+_URL_CRED_RE = re.compile(r"([a-zA-Z][a-zA-Z0-9+.-]{0,15}://[^\s:@/]*:)([^\s@/]+)(@)")
 
 # Bare ``Bearer <token>`` outside a header.
 _BEARER_RE = re.compile(r"(?i)(Bearer\s+)([A-Za-z0-9._~+/-]{12,}=*)")
@@ -85,6 +91,26 @@ _TOKEN_SHAPE_RES = [
 _PEM_RE = re.compile(
     r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----", re.DOTALL)
 
+# A PEM whose END marker was sheared off by the _REDACT_BOUND cap. Applied only to
+# capped input (an unterminated BEGIN in a short label is not credential material
+# and stays visible, as before).
+_PEM_OPEN_RE = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*", re.DOTALL)
+
+# Redaction cost grows with input length, and ``cmd_hook`` passes the WHOLE Bash
+# command as the label -- tens of KB for a heredoc-heavy command -- while the stored
+# label is truncated to well under this bound anyway (engine.LABEL_MAX, 60 chars,
+# applied in engine._make_message AFTER redaction). So cap the input before the
+# regex pass: everything past the bound can never be stored, and the pass stays
+# O(bound) instead of stalling the pre-Bash hook on a huge command (measured
+# quadratic before the cap: 2,000 chars ~0.12s, 16,000 chars ~7s).
+#
+# The bound is deliberately far larger than LABEL_MAX (mirroring agent-trail's
+# _REDACT_MARGIN of 4096): redact-then-truncate only keeps a secret straddling the
+# LABEL_MAX boundary from being sheared out of its own mask if the whole secret is
+# visible to the rules, so the window past LABEL_MAX must comfortably exceed any
+# realistic inline credential.
+_REDACT_BOUND = 4096
+
 
 def _kv_sub(match: "re.Match") -> str:
     value = match.group(2).strip("\"'").lower()
@@ -98,10 +124,24 @@ def redact_label(text: str) -> str:
 
     Keeps the readable prefix (key name, flag, scheme, tool name, host) and replaces
     only the credential, so the label still says what ran.
+
+    Input longer than ``_REDACT_BOUND`` is capped before the regex pass (the tail is
+    dropped, not returned unredacted): callers store at most the first
+    ``engine.LABEL_MAX`` chars, and an uncapped pass is quadratic on long labels.
     """
     if not text:
         return text
+    capped = len(text) > _REDACT_BOUND
+    if capped:
+        # The tail can never reach the stored label (LABEL_MAX truncation follows),
+        # so dropping it loses nothing and keeps the regex pass bounded.
+        text = text[:_REDACT_BOUND]
     out = _PEM_RE.sub(MASK, text)
+    if capped:
+        # The cap may have cut a PEM in half, leaving a BEGIN with no END for
+        # _PEM_RE to anchor on; mask from the BEGIN marker to the cut instead of
+        # letting key material survive as a "non-matching" fragment.
+        out = _PEM_OPEN_RE.sub(MASK, out)
     for pattern, _keep in _RULES:
         out = pattern.sub(lambda m: m.group(1) + MASK, out)
     out = _KV_RE.sub(_kv_sub, out)

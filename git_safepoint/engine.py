@@ -7,6 +7,11 @@ Built on git plumbing (``hash-object -w`` + private temp index +
 index and HEAD are never touched. Capture is incremental via the mtime cache,
 debounced, locked, and uses a process-spanning persistent counter for
 collision-free IDs.
+
+This module intentionally stays a single file despite its size: capture,
+restore, and prune all coordinate through the same ``RepoLock``, the shared
+``refs/snapshots/*`` namespace, and the mtime-cache invariants, and keeping
+them side by side keeps that cross-section contract auditable in one place.
 """
 from __future__ import annotations
 

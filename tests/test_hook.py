@@ -366,8 +366,15 @@ class ZshPreexecTest(unittest.TestCase):
             "tar -xzf archive.tar.gz", "tar xzf archive.tar.gz",
             "tar --extract --file archive.tar",
             "ln -sf target link", "unzip -o bundle.zip", "unzip -qo bundle.zip",
-            # Must NOT fire: create / no-force / prompt-first forms.
-            "tar -czf archive.tar.gz src", "tar -tf box",
+            # Archive WRITING also truncates an existing archive.
+            "tar -czf archive.tar.gz src", "tar czf archive.tar src",
+            # Attached option values must not hide the trigger letter...
+            "tar -xvfbackup.tar", "tar -xC/tmp -farchive.tar",
+            "unzip -od. backup.zip", "ln -ft/tmp source",
+            # ...nor invent one that lives inside the file name.
+            "tar -tvfxyz.tar", "tar -tf a.tar",
+            # Must NOT fire: listing / no-force / prompt-first forms.
+            "tar -tf box",
             "ln -s target link", "unzip bundle.zip",
         )
         for c in cases:

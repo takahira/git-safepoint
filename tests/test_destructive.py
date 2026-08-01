@@ -374,13 +374,33 @@ class OverwriteClass(unittest.TestCase):
     def test_tar_extract_long_option(self):
         self.assertTrue(looks_destructive("tar --extract --file archive.tar"))
 
-    def test_tar_create_is_not_destructive(self):
-        self.assertFalse(looks_destructive("tar -czf archive.tar.gz src"))
+    def test_tar_create_overwrites_an_existing_archive(self):
+        # Regression for a wrong assumption in the first cut of this feature:
+        # `tar -c` was treated as safe, but writing an archive TRUNCATES an
+        # existing file of that name. Measured: a file holding real data was
+        # replaced by gzip bytes, with no snapshot taken.
+        self.assertTrue(looks_destructive("tar -czf archive.tar.gz src"))
+        self.assertTrue(looks_destructive("tar czf archive.tar src"))
 
     def test_tar_list_with_x_in_filename_does_not_fire(self):
         # The dashless bundle is only read from the FIRST argument, so an
         # ordinary all-alpha filename containing the trigger letter is safe.
         self.assertFalse(looks_destructive("tar -tf box"))
+
+    def test_attached_option_value_does_not_hide_the_trigger(self):
+        # `-f` consumes the rest of the token, so the cluster is not all-alpha.
+        # Requiring isalpha() made these genuine overwrites invisible.
+        # `tar -xvfbackup.tar` was verified to really extract (BSD tar).
+        self.assertTrue(looks_destructive("tar -xvfbackup.tar"))
+        self.assertTrue(looks_destructive("tar -xC/tmp -farchive.tar"))
+        self.assertTrue(looks_destructive("unzip -od. backup.zip"))
+        self.assertTrue(looks_destructive("ln -ft/tmp source"))
+
+    def test_trigger_letter_inside_an_attached_value_does_not_fire(self):
+        # The other direction: in `-tvfxyz.tar` the x belongs to the FILE NAME
+        # (f already consumed the remainder), so a plain listing must stay quiet.
+        self.assertFalse(looks_destructive("tar -tvfxyz.tar"))
+        self.assertFalse(looks_destructive("tar -tf a.tar"))
 
     def test_ln_force_clustered(self):
         self.assertTrue(looks_destructive("ln -sf target link"))

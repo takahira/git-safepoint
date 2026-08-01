@@ -79,12 +79,30 @@ DESTRUCTIVE_FLAG_CMDS: "dict[str, set[str]]" = {
 # anywhere in a cluster; entries starting with ``--`` are long options matched
 # whole.
 DESTRUCTIVE_CLUSTER_FLAG_CMDS: "dict[str, set[str]]" = {
-    # Extraction overwrites existing files; ``tar -c`` (create) does not.
-    "tar": {"x", "--extract", "--get"},
+    # Extraction overwrites existing files -- and so does CREATION: ``tar -czf
+    # archive.tar src`` truncates an existing ``archive.tar`` (measured, not
+    # assumed). ``r``/``u`` rewrite the archive in place and ``A`` concatenates
+    # into it, so every archive-writing mode belongs here; only read-only modes
+    # (``t`` list) stay out.
+    "tar": {"x", "c", "r", "u", "A",
+            "--extract", "--get", "--create", "--append", "--update",
+            "--concatenate", "--catenate"},
     # ``ln -f`` replaces an existing target; without it ln just fails.
     "ln": {"f", "--force"},
     # ``unzip -o`` overwrites without prompting; a bare ``unzip`` asks first.
     "unzip": {"o"},
+}
+
+# Short options that CONSUME the rest of the token as their value, so scanning a
+# cluster must stop at them: in ``tar -tvfxyz.tar`` the ``x`` belongs to the file
+# name ``xyz.tar``, not to the option bundle, and treating it as the extract flag
+# would fire on a plain listing. Conversely the letters BEFORE such an option are
+# real flags even when the rest of the token is not alphabetic, which is why
+# ``tar -xvfbackup.tar`` (a genuine extraction) must still fire.
+_CLUSTER_VALUE_OPTS: "dict[str, set[str]]" = {
+    "tar": set("fbCTXIFKs"),
+    "ln": set("tS"),
+    "unzip": set("dx"),
 }
 
 # Wrapper commands to peel off before reading the real verb. These run the
@@ -439,8 +457,29 @@ def segment_is_destructive(tokens: List[str]) -> bool:
                 cluster = t
             else:
                 continue
-            if cluster and cluster.isalpha() and letters & set(cluster):
+            if _cluster_triggers(cluster, letters, _CLUSTER_VALUE_OPTS.get(verb, set())):
                 return True
+    return False
+
+
+def _cluster_triggers(cluster: str, letters: "set[str]", value_opts: "set[str]") -> bool:
+    """True when a short-option bundle contains a trigger letter.
+
+    Scans left to right and stops at the first option that consumes the rest of
+    the token as its value (``-xvfbackup.tar``: ``f`` takes ``backup.tar``). This
+    is what lets an attached value be handled correctly in BOTH directions --
+    ``tar -xvfbackup.tar`` fires because ``x`` precedes ``f``, while
+    ``tar -tvfxyz.tar`` does not, because the ``x`` sits inside the file name.
+    A non-letter before any value option means this is not an option bundle at
+    all (a path, a number), so stop rather than guess.
+    """
+    for char in cluster:
+        if char in letters:
+            return True
+        if char in value_opts:
+            return False
+        if not char.isalpha():
+            return False
     return False
 
 

@@ -30,13 +30,22 @@ typeset -ga _GSP_VERBS=(rm rmdir mv truncate dd shred gzip bzip2 xz patch \
 typeset -ga _GSP_GIT_SUBCMDS=(checkout switch restore reset clean rm stash)
 typeset -ga _GSP_INPLACE_CMDS=(sed perl awk)   # destructive only with -i
 # Overwrite class gated on a CLUSTERED short option (`tar -xzf`, `ln -sf`,
-# `unzip -qo`). Bare letters match anywhere inside a short-option cluster;
-# `--` entries match whole. Mirrors destructive.py DESTRUCTIVE_CLUSTER_FLAG_CMDS.
+# `unzip -qo`). Bare letters are short-option letters; `--` entries match whole.
+# Mirrors destructive.py DESTRUCTIVE_CLUSTER_FLAG_CMDS.
 typeset -gA _GSP_CLUSTER_FLAGS
 _GSP_CLUSTER_FLAGS=(
-  tar   "x --extract --get"
+  tar   "x c r u A --extract --get --create --append --update --concatenate --catenate"
   ln    "f --force"
   unzip "o"
+)
+# Short options that consume the REST of the token as their value, so a cluster
+# scan must stop there (`tar -tvfxyz.tar`: the x is inside the file name, not a
+# flag). Mirrors destructive.py _CLUSTER_VALUE_OPTS.
+typeset -gA _GSP_CLUSTER_VALUE_OPTS
+_GSP_CLUSTER_VALUE_OPTS=(
+  tar   "f b C T X I F K s"
+  ln    "t S"
+  unzip "d x"
 )
 typeset -ga _GSP_WRAPPERS=(env sudo doas time nohup command exec builtin \
   nice xargs timeout stdbuf setsid ionice)
@@ -238,11 +247,24 @@ _git_safepoint_is_destructive() {
         else
           continue
         fi
-        # All-alpha check without extendedglob: no non-letter character present.
-        [[ -n "$_cluster" && "$_cluster" != *[^a-zA-Z]* ]] || continue
-        for _spec in ${=_GSP_CLUSTER_FLAGS[$verb]}; do
-          [[ "$_spec" == --* ]] && continue
-          [[ "$_cluster" == *"$_spec"* ]] && return 0
+        [[ -n "$_cluster" ]] || continue
+        # 左から 1 文字ずつ見て、トリガー文字なら発火、値を食うオプション
+        # (tar の f 等) に当たったらそこで打ち切る。`-xvfbackup.tar` は x が f
+        # より前なので発火し、`-tvfxyz.tar` は f で止まるので発火しない。
+        local _i=1 _ch _stop=0
+        while (( _i <= ${#_cluster} )); do
+          _ch="${_cluster[$_i]}"
+          for _spec in ${=_GSP_CLUSTER_FLAGS[$verb]}; do
+            [[ "$_spec" == --* ]] && continue
+            [[ "$_ch" == "$_spec" ]] && return 0
+          done
+          for _spec in ${=_GSP_CLUSTER_VALUE_OPTS[$verb]}; do
+            [[ "$_ch" == "$_spec" ]] && _stop=1 && break
+          done
+          (( _stop )) && break
+          # オプション束でない文字（パス・数字）に当たったら打ち切る
+          [[ "$_ch" == [a-zA-Z] ]] || break
+          (( _i++ ))
         done
       done
     fi

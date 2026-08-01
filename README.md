@@ -249,7 +249,7 @@ The hook's destructive-command detection uses a verb-allowlist approach optimize
 - `python3 -c "open('f','w').write(...)"` — verb is `python3`
 - `find . -delete` — verb is `find`; the deletion is expressed as a *flag*, not a head verb
 
-The **overwrite class** — commands that replace an existing destination rather than deleting it — *is* covered: `cp`, `rsync` and `install` fire on the verb, and `tar -x` / `ln -f` / `unzip -o` fire on their clustered short option (`tar -xzf`, `ln -sf`, `unzip -qo`, plus tar's dashless `tar xzf`). Non-overwriting forms deliberately do not fire: `tar -c` (create), `ln -s` without `-f` (fails instead of replacing), and a bare `unzip` (prompts first).
+The **overwrite class** — commands that replace an existing destination rather than deleting it — *is* covered: `cp`, `rsync` and `install` fire on the verb. `tar`, `ln -f` and `unzip -o` fire on their clustered short options, including tar's dashless form (`tar xzf`). For tar, every *archive-writing* mode counts (`-x` extract, and also `-c`/`-r`/`-u`/`-A`, because writing an archive truncates an existing file of that name); only `-t` (list) is treated as read-only. Attached option values are parsed rather than rejected, so `tar -xvfbackup.tar` fires while `tar -tvfxyz.tar` does not — the scan stops at the option that consumes the rest of the token, so an `x` living inside a file name is not mistaken for the extract flag. Non-overwriting forms deliberately stay quiet: `ln -s` without `-f` (fails instead of replacing) and a bare `unzip` (prompts first).
 
 The git-subcommand allowlist (`checkout`/`switch`/`restore`/`reset`/`clean`/`rm`/`stash`, plus `branch -D`) is deliberately narrow: recovery/abort subcommands that can touch the work tree — `rebase`/`merge`/`am`/`cherry-pick --abort`, `read-tree -u`, `checkout-index -f`, `worktree remove` — are **not** individually thorough-mode triggers. Most refuse to run with conflicting uncommitted changes (so they don't silently destroy unsaved work), and any residual case is covered by conservative mode below; the trade-off keeps the false-positive rate near zero.
 
@@ -291,7 +291,7 @@ pruned.
 
 ```sh
 python3 -m unittest discover -s tests -p 'test_*.py'
-# → 337 tests pass (macOS / Linux; 2 non-UTF-8-name tests skip on macOS)
+# → 339 tests pass (macOS / Linux; 2 non-UTF-8-name tests skip on macOS)
 ```
 
 ---

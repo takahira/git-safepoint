@@ -32,6 +32,16 @@ DESTRUCTIVE_VERBS = {
     "bzip2",
     "xz",
     "patch",
+    # Overwrite class (#3). Both REPLACE an existing destination by default --
+    # ``cp new old`` and ``rsync src/ dst/`` need no flag to clobber, and
+    # ``rsync --delete`` removes extra files at the destination. README's own
+    # motivating example is a ``cp`` overwrite, so leaving them out contradicted
+    # the stated scope. Fired on the verb without inspecting the destination:
+    # over-firing on a copy to a fresh path is a harmless deduped snapshot,
+    # under-firing loses the overwritten original.
+    "cp",
+    "rsync",
+    "install",
 }
 
 # Verbs that overwrite a file ARGUMENT (no shell redirect) unless an append flag
@@ -60,6 +70,21 @@ DESTRUCTIVE_FLAG_CMDS: "dict[str, set[str]]" = {
     "sed":  {"-i", "--in-place"},
     "awk":  {"-i"},
     "perl": {"-i"},
+}
+
+# Overwrite class (#3) whose trigger is a SHORT option that is normally
+# *clustered* (``tar -xzf``, ``ln -sf``, ``unzip -qo``), so the glued 2-char
+# prefix match used by DESTRUCTIVE_FLAG_CMDS is not enough -- ``-sf`` does not
+# start with ``-f``. Bare single characters are short-option letters matched
+# anywhere in a cluster; entries starting with ``--`` are long options matched
+# whole.
+DESTRUCTIVE_CLUSTER_FLAG_CMDS: "dict[str, set[str]]" = {
+    # Extraction overwrites existing files; ``tar -c`` (create) does not.
+    "tar": {"x", "--extract", "--get"},
+    # ``ln -f`` replaces an existing target; without it ln just fails.
+    "ln": {"f", "--force"},
+    # ``unzip -o`` overwrites without prompting; a bare ``unzip`` asks first.
+    "unzip": {"o"},
 }
 
 # Wrapper commands to peel off before reading the real verb. These run the
@@ -395,6 +420,27 @@ def segment_is_destructive(tokens: List[str]) -> bool:
                 # ``--in-place`` does not match unrelated long options.
                 if t.startswith(f + "=") or (len(f) == 2 and t.startswith(f)):
                     return True
+    # Clustered short options (``tar -xzf``, ``ln -sf``). Only dashed tokens are
+    # scanned, plus tar's dashless leading bundle (``tar xzf a.tar``) which is
+    # restricted to the FIRST argument so an ordinary filename containing the
+    # trigger letter (``tar -tf box``) cannot fire.
+    if verb in DESTRUCTIVE_CLUSTER_FLAG_CMDS:
+        spec = DESTRUCTIVE_CLUSTER_FLAG_CMDS[verb]
+        letters = {s for s in spec if not s.startswith("--")}
+        long_opts = {s for s in spec if s.startswith("--")}
+        for index, t in enumerate(tokens[1:], start=1):
+            if t in long_opts:
+                return True
+            if t.startswith("--"):
+                continue
+            if t.startswith("-"):
+                cluster = t[1:]
+            elif verb == "tar" and index == 1:
+                cluster = t
+            else:
+                continue
+            if cluster and cluster.isalpha() and letters & set(cluster):
+                return True
     return False
 
 

@@ -317,6 +317,12 @@ class ZshAdapterMirrorSyncTest(unittest.TestCase):
             set(destructive.DESTRUCTIVE_FLAG_CMDS),
         )
 
+    def test_cluster_flags_in_sync(self):
+        self.assertEqual(
+            _parse_zsh_assoc(self.zsh, "_GSP_CLUSTER_FLAGS"),
+            {k: set(v) for k, v in destructive.DESTRUCTIVE_CLUSTER_FLAG_CMDS.items()},
+        )
+
     def test_wrappers_in_sync(self):
         self.assertEqual(
             _parse_zsh_array(self.zsh, "_GSP_WRAPPERS"),
@@ -328,6 +334,59 @@ class ZshAdapterMirrorSyncTest(unittest.TestCase):
             _parse_zsh_assoc(self.zsh, "_GSP_WRAPPER_VALOPTS"),
             {k: set(v) for k, v in destructive._WRAPPER_VALUE_OPTS.items()},
         )
+
+
+class OverwriteClass(unittest.TestCase):
+    """Issue #3: commands that REPLACE an existing destination.
+
+    The zsh preexec path has no conservative fallback, so an unrecognised
+    overwrite there is fully unprotected. README's motivating example is a `cp`
+    overwrite, so these belong in the allowlist.
+    """
+
+    def test_cp_overwrite(self):
+        self.assertTrue(looks_destructive("cp -f new.txt old.txt"))
+
+    def test_cp_plain(self):
+        # Fired on the verb without inspecting the destination: over-firing on a
+        # copy to a fresh path is a harmless deduped snapshot.
+        self.assertTrue(looks_destructive("cp a.txt b.txt"))
+
+    def test_rsync_delete(self):
+        self.assertTrue(looks_destructive("rsync -a --delete src/ dst/"))
+
+    def test_install(self):
+        self.assertTrue(looks_destructive("install -m 755 bin/tool /usr/local/bin/tool"))
+
+    def test_unzip_overwrite_flag(self):
+        self.assertTrue(looks_destructive("unzip -o bundle.zip"))
+
+    def test_unzip_without_overwrite_flag(self):
+        # A bare unzip prompts before replacing, so it is not a silent overwrite.
+        self.assertFalse(looks_destructive("unzip bundle.zip"))
+
+    def test_tar_extract_clustered(self):
+        self.assertTrue(looks_destructive("tar -xzf archive.tar.gz"))
+
+    def test_tar_extract_dashless(self):
+        self.assertTrue(looks_destructive("tar xzf archive.tar.gz"))
+
+    def test_tar_extract_long_option(self):
+        self.assertTrue(looks_destructive("tar --extract --file archive.tar"))
+
+    def test_tar_create_is_not_destructive(self):
+        self.assertFalse(looks_destructive("tar -czf archive.tar.gz src"))
+
+    def test_tar_list_with_x_in_filename_does_not_fire(self):
+        # The dashless bundle is only read from the FIRST argument, so an
+        # ordinary all-alpha filename containing the trigger letter is safe.
+        self.assertFalse(looks_destructive("tar -tf box"))
+
+    def test_ln_force_clustered(self):
+        self.assertTrue(looks_destructive("ln -sf target link"))
+
+    def test_ln_without_force(self):
+        self.assertFalse(looks_destructive("ln -s target link"))
 
 
 if __name__ == "__main__":

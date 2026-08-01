@@ -247,6 +247,9 @@ The hook's destructive-command detection uses a verb-allowlist approach optimize
 - `` echo `rm -rf x` `` — verb is `echo`
 - `(rm -rf x)` — leading token is `(`
 - `python3 -c "open('f','w').write(...)"` — verb is `python3`
+- `find . -delete` — verb is `find`; the deletion is expressed as a *flag*, not a head verb
+
+The **overwrite class** — commands that replace an existing destination rather than deleting it — *is* covered: `cp`, `rsync` and `install` fire on the verb, and `tar -x` / `ln -f` / `unzip -o` fire on their clustered short option (`tar -xzf`, `ln -sf`, `unzip -qo`, plus tar's dashless `tar xzf`). Non-overwriting forms deliberately do not fire: `tar -c` (create), `ln -s` without `-f` (fails instead of replacing), and a bare `unzip` (prompts first).
 
 The git-subcommand allowlist (`checkout`/`switch`/`restore`/`reset`/`clean`/`rm`/`stash`, plus `branch -D`) is deliberately narrow: recovery/abort subcommands that can touch the work tree — `rebase`/`merge`/`am`/`cherry-pick --abort`, `read-tree -u`, `checkout-index -f`, `worktree remove` — are **not** individually thorough-mode triggers. Most refuse to run with conflicting uncommitted changes (so they don't silently destroy unsaved work), and any residual case is covered by conservative mode below; the trade-off keeps the false-positive rate near zero.
 
@@ -288,7 +291,7 @@ pruned.
 
 ```sh
 python3 -m unittest discover -s tests -p 'test_*.py'
-# → 320 tests pass (macOS / Linux; 2 non-UTF-8-name tests skip on macOS)
+# → 337 tests pass (macOS / Linux; 2 non-UTF-8-name tests skip on macOS)
 ```
 
 ---

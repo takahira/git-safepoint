@@ -20,13 +20,24 @@
 # authoritative head-verb allowlist in git_safepoint/destructive.py. Over-firing
 # (an extra snapshot) is harmless; a miss leaves you unprotected, so when in
 # doubt this list errs toward firing.
-# NOTE: all five mirrored tables below (_GSP_VERBS / _GSP_GIT_SUBCMDS /
-# _GSP_INPLACE_CMDS / _GSP_WRAPPERS / _GSP_WRAPPER_VALOPTS) are sync-checked
-# against destructive.py by tests/test_destructive.py::ZshAdapterMirrorSyncTest --
-# edit both sides together or that test fails.
-typeset -ga _GSP_VERBS=(rm rmdir mv truncate dd shred gzip bzip2 xz patch)
+# NOTE: all six mirrored tables below (_GSP_VERBS / _GSP_GIT_SUBCMDS /
+# _GSP_INPLACE_CMDS / _GSP_CLUSTER_FLAGS / _GSP_WRAPPERS / _GSP_WRAPPER_VALOPTS)
+# are sync-checked against destructive.py by
+# tests/test_destructive.py::ZshAdapterMirrorSyncTest -- edit both sides together
+# or that test fails.
+typeset -ga _GSP_VERBS=(rm rmdir mv truncate dd shred gzip bzip2 xz patch \
+  cp rsync install)
 typeset -ga _GSP_GIT_SUBCMDS=(checkout switch restore reset clean rm stash)
 typeset -ga _GSP_INPLACE_CMDS=(sed perl awk)   # destructive only with -i
+# Overwrite class gated on a CLUSTERED short option (`tar -xzf`, `ln -sf`,
+# `unzip -qo`). Bare letters match anywhere inside a short-option cluster;
+# `--` entries match whole. Mirrors destructive.py DESTRUCTIVE_CLUSTER_FLAG_CMDS.
+typeset -gA _GSP_CLUSTER_FLAGS
+_GSP_CLUSTER_FLAGS=(
+  tar   "x --extract --get"
+  ln    "f --force"
+  unzip "o"
+)
 typeset -ga _GSP_WRAPPERS=(env sudo doas time nohup command exec builtin \
   nice xargs timeout stdbuf setsid ionice)
 # wrapper -> space-padded list of options that consume a following value token,
@@ -200,6 +211,39 @@ _git_safepoint_is_destructive() {
         case "$a" in
           -i|-i*|--in-place|--in-place=*) return 0 ;;
         esac
+      done
+    fi
+    # Overwrite class gated on a clustered short option (tar -xzf / ln -sf /
+    # unzip -qo). tar also accepts a dashless leading bundle (`tar xzf a.tar`),
+    # read only from the FIRST argument so an ordinary all-alpha filename
+    # containing the trigger letter (`tar -tf box`) cannot fire.
+    if [[ -n "${_GSP_CLUSTER_FLAGS[$verb]}" ]]; then
+      local _spec _tok _cluster _idx=0 _hit=0
+      for _spec in ${=_GSP_CLUSTER_FLAGS[$verb]}; do
+        for _tok in "${sw[@]:1}"; do
+          [[ "$_spec" == --* && "$_tok" == "$_spec" ]] && _hit=1 && break
+        done
+        (( _hit )) && break
+      done
+      (( _hit )) && return 0
+      for _tok in "${sw[@]:1}"; do
+        (( _idx++ ))
+        _cluster=""
+        if [[ "$_tok" == --* ]]; then
+          continue
+        elif [[ "$_tok" == -* ]]; then
+          _cluster="${_tok#-}"
+        elif [[ "$verb" == tar && $_idx -eq 1 ]]; then
+          _cluster="$_tok"
+        else
+          continue
+        fi
+        # All-alpha check without extendedglob: no non-letter character present.
+        [[ -n "$_cluster" && "$_cluster" != *[^a-zA-Z]* ]] || continue
+        for _spec in ${=_GSP_CLUSTER_FLAGS[$verb]}; do
+          [[ "$_spec" == --* ]] && continue
+          [[ "$_cluster" == *"$_spec"* ]] && return 0
+        done
       done
     fi
     if [[ "$verb" == git ]]; then

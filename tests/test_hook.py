@@ -354,6 +354,25 @@ class ZshPreexecTest(unittest.TestCase):
                   "make && rm x", "build >& log"):
             self.assertTrue(self._destructive(c), c)
 
+    def test_overwrite_class_parity_with_python(self):
+        # Issue #3: the preexec path has no conservative fallback, so the
+        # overwrite class must fire HERE, not just in destructive.py. Asserted
+        # against the Python detector so the two cannot drift in behaviour
+        # (the tables themselves are compared by ZshAdapterMirrorSyncTest).
+        from git_safepoint.destructive import looks_destructive
+        cases = (
+            "cp -f new old", "cp a b", "rsync -a --delete src/ dst/",
+            "install -m 755 bin/tool /usr/local/bin/tool",
+            "tar -xzf archive.tar.gz", "tar xzf archive.tar.gz",
+            "tar --extract --file archive.tar",
+            "ln -sf target link", "unzip -o bundle.zip", "unzip -qo bundle.zip",
+            # Must NOT fire: create / no-force / prompt-first forms.
+            "tar -czf archive.tar.gz src", "tar -tf box",
+            "ln -s target link", "unzip bundle.zip",
+        )
+        for c in cases:
+            self.assertEqual(self._destructive(c), looks_destructive(c), c)
+
     def test_nondestructive_cases_do_not_fire(self):
         for c in ("ls -l", "echo hi", "cat a >> log", "git status",
                   "ls | tee", "echo hi 2>&1"):

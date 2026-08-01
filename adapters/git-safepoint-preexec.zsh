@@ -27,7 +27,14 @@
 # or that test fails.
 typeset -ga _GSP_VERBS=(rm rmdir mv truncate dd shred gzip bzip2 xz patch \
   cp rsync install)
-typeset -ga _GSP_GIT_SUBCMDS=(checkout switch restore reset clean rm stash)
+# Sequencer commands (merge/rebase/cherry-pick/revert/am) rewind or rewrite the
+# work tree via --abort/--quit/--skip and can leave a half-applied state over
+# uncommitted work; apply/checkout-index write files straight into it. Fired on
+# the subcommand without flag inspection, matching this table's existing policy.
+typeset -ga _GSP_GIT_SUBCMDS=(checkout switch restore reset clean rm stash \
+  merge rebase cherry-pick revert am apply checkout-index)
+# `git worktree` only touches files for these; `list`/`add` must not fire.
+typeset -ga _GSP_GIT_WORKTREE_SUBS=(remove prune move repair)
 typeset -ga _GSP_INPLACE_CMDS=(sed perl awk)   # destructive only with -i
 # Overwrite class gated on a CLUSTERED short option (`tar -xzf`, `ln -sf`,
 # `unzip -qo`). Bare letters are short-option letters; `--` entries match whole.
@@ -364,6 +371,13 @@ _git_safepoint_is_destructive() {
           case "$a" in
             -D|-d|--delete) return 0 ;;
           esac
+        done
+      fi
+      # `git worktree` only touches files for remove/prune/move/repair;
+      # `list`/`add` must not force a full-tree rehash.
+      if [[ "$sub" == worktree ]]; then
+        for a in "${sw[@]}"; do
+          if (( ${_GSP_GIT_WORKTREE_SUBS[(Ie)$a]} )); then return 0; fi
         done
       fi
     fi

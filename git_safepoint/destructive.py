@@ -51,15 +51,23 @@ DESTRUCTIVE_UNLESS_APPEND = {
 }
 
 # git subcommands that can clobber the work tree.
-DESTRUCTIVE_GIT_SUBCMDS = {
-    "checkout",
-    "switch",  # any git switch can discard uncommitted work (over-fires like the other subcmds)
-    "restore",
-    "reset",
-    "clean",
-    "rm",
-    "stash",  # `git stash` can hide uncommitted work
+DESTRUCTIVE_GIT_SUBCMDS: "set[str]" = {
+    # Well-known work-tree clobberers.
+    "checkout", "switch", "restore", "reset", "clean", "rm", "stash",
+    # Sequencer commands: `--abort` / `--quit` / `--skip` all rewind or rewrite
+    # the work tree, and the plain forms can leave conflict markers or a
+    # half-applied state over uncommitted work. Fired on the SUBCOMMAND without
+    # flag inspection, matching the existing policy for this table: over-firing
+    # costs one deduped snapshot, under-firing costs the user's data.
+    "merge", "rebase", "cherry-pick", "revert", "am",
+    # Writes files from a patch / from the index straight into the work tree.
+    "apply", "checkout-index",
 }
+
+# `git worktree` is only destructive with a subcommand that removes or moves a
+# tree; `list` / `add` / `lock` are common read-only-ish calls and firing on them
+# would cost a full-tree rehash every time. Same shape as the `git branch` rule.
+_GIT_WORKTREE_DESTRUCTIVE_SUBS = {"remove", "prune", "move", "repair"}
 
 # `git branch` is only destructive with a delete flag (`-D` / `-d` / `--delete`).
 _GIT_BRANCH_DELETE_FLAGS = {"-D", "-d", "--delete"}
@@ -283,6 +291,18 @@ def _tokenize(line: str) -> List[str]:
     """
     lex = shlex.shlex(line, posix=True, punctuation_chars=True)
     lex.whitespace_split = True
+    # shlex defaults to commenters='#', which DISCARDS the rest of the line from
+    # the first '#' -- even mid-word, and even though a POSIX shell only starts a
+    # comment at a word boundary. That silently truncated real commands:
+    #
+    #     echo a#b; rm -rf notes   ->  ['echo', 'a']      -> judged SAFE
+    #
+    # i.e. no snapshot before an rm -rf. Under-firing is the one direction this
+    # tool must never take, so comment handling is turned off entirely. A real
+    # trailing comment then contributes harmless extra word tokens; the head-verb
+    # check ignores them, and at worst a '#'-containing word costs one extra
+    # (deduped) snapshot.
+    lex.commenters = ''
     return list(lex)
 
 
@@ -467,6 +487,10 @@ def segment_is_destructive(tokens: List[str]) -> bool:
             return True
         # `git branch` only clobbers refs with a delete flag.
         if sub == "branch" and any(t in _GIT_BRANCH_DELETE_FLAGS for t in tokens):
+            return True
+        # `git worktree` only touches files for remove/prune/move/repair.
+        if sub == "worktree" and any(
+                t in _GIT_WORKTREE_DESTRUCTIVE_SUBS for t in tokens):
             return True
     # Flag-gated in-place editors: sed -i, awk -i, perl -i, and glued suffix
     # forms like ``sed -i.bak`` (a short ``-i`` flag followed by a backup suffix).

@@ -508,6 +508,13 @@ class ZshAdapterBehaviourParityTest(unittest.TestCase):
         "cat a | tee b", "cat a | tee -a b", "tee /dev/null", "ls | grep x",
         "echo hello", "truncate -s 0 f", "dd if=a of=b", "shred f", "gzip f",
         "xz f", "patch < p.diff",
+        # oss-strategy#12: comment truncation and the git subcommand gaps
+        "echo a#b; rm -rf notes", "git commit -m 'fix #12' && rm -rf x",
+        "ls  # rm -rf everything",
+        "git rebase --abort", "git cherry-pick --abort", "git merge --abort",
+        "git am --abort", "git revert --abort", "git apply patch.diff",
+        "git checkout-index -a -f", "git worktree remove wt",
+        "git worktree prune", "git worktree list", "git worktree add ../wt",
     ]
 
     @classmethod
@@ -551,3 +558,68 @@ class ZshAdapterBehaviourParityTest(unittest.TestCase):
             "\n".join("  {0!r}: python={1} zsh={2}".format(*m)
                       for m in mismatches),
         )
+
+
+class ShlexCommentTruncationTest(unittest.TestCase):
+    """oss-strategy#12: `shlex` defaults to `commenters='#'`, which discards the
+    rest of the line from the first `#` -- even mid-word, and even though a POSIX
+    shell only starts a comment at a word boundary.
+
+    That silently truncated real commands BEFORE the destructive verb was ever
+    seen, so no snapshot was taken. Under-firing is the one direction this tool
+    must never take."""
+
+    def test_hash_in_a_word_does_not_hide_a_later_verb(self):
+        self.assertTrue(destructive.looks_destructive("echo a#b; rm -rf notes"))
+
+    def test_hash_in_a_quoted_string_does_not_hide_a_later_verb(self):
+        self.assertTrue(
+            destructive.looks_destructive("git commit -m 'fix #12' && rm -rf x"))
+
+    def test_hash_in_a_filename_still_fires(self):
+        self.assertTrue(destructive.looks_destructive("rm -rf 'notes#1'"))
+
+    def test_a_trailing_comment_does_not_invent_a_verb(self):
+        self.assertFalse(destructive.looks_destructive("ls  # rm -rf everything"))
+
+
+class DestructiveGitSubcommandTest(unittest.TestCase):
+    """oss-strategy#12: the sequencer and file-writing git subcommands were not
+    detected at all, so `git rebase --abort` / `git apply` / `git checkout-index`
+    rewrote the work tree with no snapshot taken first."""
+
+    FIRES = [
+        "git rebase --abort", "git rebase --skip", "git rebase main",
+        "git cherry-pick --abort", "git merge --abort", "git merge feature",
+        "git revert --abort", "git am --abort",
+        "git apply patch.diff", "git checkout-index -a -f",
+        "git worktree remove wt", "git worktree prune", "git worktree move a b",
+    ]
+    SAFE = [
+        "git status", "git log --oneline", "git diff", "git fetch",
+        # `worktree` is flag-gated like `branch`: these are common and must not
+        # cost a full-tree rehash.
+        "git worktree list", "git worktree add ../wt",
+    ]
+
+    # The whole point of the parity test is that Python and zsh agree; extend the
+    # shared case list so these ride along instead of being Python-only.
+
+
+    def test_worktree_clobbering_subcommands_fire(self):
+        for cmd in self.FIRES:
+            self.assertTrue(destructive.looks_destructive(cmd), cmd)
+
+    def test_read_only_subcommands_do_not_fire(self):
+        for cmd in self.SAFE:
+            self.assertFalse(destructive.looks_destructive(cmd), cmd)
+
+    def test_the_new_subcommands_are_mirrored_in_the_zsh_adapter(self):
+        path = os.path.join(helpers.PKG_ROOT, "adapters",
+                            "git-safepoint-preexec.zsh")
+        with open(path, encoding="utf-8") as fh:
+            zsh = fh.read()
+        self.assertEqual(_parse_zsh_array(zsh, "_GSP_GIT_SUBCMDS"),
+                         set(destructive.DESTRUCTIVE_GIT_SUBCMDS))
+        self.assertEqual(_parse_zsh_array(zsh, "_GSP_GIT_WORKTREE_SUBS"),
+                         destructive._GIT_WORKTREE_DESTRUCTIVE_SUBS)

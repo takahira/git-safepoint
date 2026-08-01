@@ -377,6 +377,26 @@ def list_tracked(repo: str) -> List[str]:
     return _decode_z(out)
 
 
+def list_modified_tracked(repo: str) -> List[str]:
+    """Tracked paths whose WORK-TREE content differs from the index.
+
+    This is exactly the delta a snapshot would newly write into the object
+    database. Two deliberate choices:
+
+    - ``diff-files`` compares work tree against **index**, not HEAD: content
+      already staged was put in the object store by the user's own ``git add``,
+      so it is not something we would be introducing.
+    - ``--diff-filter=d`` EXCLUDES deletions. A tracked file removed from the work
+      tree is "modified" to git, but capture reinjects its staged blob rather than
+      hashing anything new, so there is no new content to leak and treating it as
+      modified would drop a deleted tracked secret from the snapshot for nothing.
+    """
+    out = run_git(
+        repo, ["diff-files", "-z", "--name-only", "--diff-filter=d"]
+    ).stdout
+    return _decode_z(out)
+
+
 def cached_stage_info(repo: str) -> Dict[str, Tuple[str, str]]:
     """``{path: (mode, blob_sha)}`` for stage-0 index entries.
 
@@ -413,13 +433,19 @@ def list_worktree_files(
     Stage 2 (opt-in): when ``include_ignored`` patterns are given, also pull in
     ignored untracked paths that match those patterns (e.g. ``output/``).
 
-    Stage 3 (always, even with opt-in): every UNTRACKED candidate path is run
-    through the secret matcher; matches are dropped and returned separately so the
-    caller can report them. Files tracked in the index are EXEMPT from the floor:
-    their blobs are already in the object store, so snapshotting them
-    leaks nothing, and excluding them would leave a tracked ``id_rsa`` /
-    ``server.pem`` / ``credentials.json`` unprotected for zero secrecy benefit. So
-    the floor only ever keeps an UNTRACKED secret out of the snapshot.
+    Stage 3 (always, even with opt-in): every candidate path is run through the
+    secret matcher; matches are dropped and returned separately so the caller can
+    report them. A tracked secret is EXEMPT only while it is UNMODIFIED: its blob
+    is already in the object store, so snapshotting it stores nothing new, and
+    excluding it would leave a tracked ``id_rsa`` / ``server.pem`` /
+    ``credentials.json`` unprotected for zero secrecy benefit.
+
+    That exemption does NOT extend to a tracked secret edited in the work tree.
+    A ``.env`` committed with placeholders but edited locally to a live token has
+    contents that exist nowhere in the object store yet, and capture would write
+    them there with ``hash-object -w`` -- permanently, and reachable by
+    ``git push --mirror`` / ``git bundle --all``. Those are dropped like an
+    untracked secret.
 
     ``-z`` keeps odd names (spaces / newlines / non-ASCII) intact. We dedupe
     because cached and others can overlap in rare edge cases.
@@ -447,13 +473,21 @@ def list_worktree_files(
                 seen_set.add(path)
                 seen.append(path)
 
-    # Stage 3: strip secrets from UNTRACKED paths only (tracked files are exempt;
-    # see docstring). One extra ``ls-files`` fork buys the tracked set.
-    tracked = set(list_tracked(repo))
+    # Stage 3: strip secret-shaped paths. A tracked one is exempt only while it
+    # matches the index -- see the docstring. Two extra ``ls-files``/``diff-files``
+    # forks buy the tracked and locally-modified sets; both are skipped entirely
+    # unless something actually looks like a secret, so the common case pays
+    # nothing.
     kept: List[str] = []
     dropped: List[str] = []
+    candidates = [rel for rel in seen if secret.is_secret(rel, secret_patterns)]
+    if not candidates:
+        return list(seen), dropped
+    tracked = set(list_tracked(repo))
+    modified = set(list_modified_tracked(repo))
+    exempt = {rel for rel in candidates if rel in tracked and rel not in modified}
     for rel in seen:
-        if rel in tracked or not secret.is_secret(rel, secret_patterns):
+        if rel not in candidates or rel in exempt:
             kept.append(rel)
         else:
             dropped.append(rel)

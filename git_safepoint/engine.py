@@ -15,6 +15,7 @@ them side by side keeps that cross-section contract auditable in one place.
 """
 from __future__ import annotations
 
+import contextlib
 import os
 import shutil
 import stat
@@ -1388,7 +1389,21 @@ def _backup_existing(repo: str, rel: str, no_backup: bool) -> Optional[str]:
     # Validate the destination with the same traversal / symlinked-parent guard
     # as the restore target, then pick a non-clobbering name.
     bak_path = _safe_abs(repo, os.path.join(gitutil.SNAP_BAK_DIR, rel))
-    os.makedirs(os.path.dirname(bak_path), exist_ok=True)
+    # 0700 on the backup ROOT, not just the leaf: under the usual umask 022 these
+    # directories were 0755, so a backed-up 0600 `.env` sat readable by every
+    # local user. Locking the root is what actually blocks traversal, and
+    # os.makedirs only applies `mode` to the leaf, so the root is created
+    # explicitly. Pre-existing roots are tightened too -- a store created by an
+    # older version is exactly the one holding old backups.
+    bak_root = os.path.join(repo, gitutil.SNAP_BAK_DIR)
+    os.makedirs(bak_root, mode=0o700, exist_ok=True)
+    with contextlib.suppress(OSError):
+        os.chmod(bak_root, 0o700)
+    parent = os.path.dirname(bak_path)
+    if parent and parent != bak_root:
+        os.makedirs(parent, mode=0o700, exist_ok=True)
+        with contextlib.suppress(OSError):
+            os.chmod(parent, 0o700)
     bak_path = _unique_backup_path(bak_path)
     if os.path.islink(abs_path):
         target = os.readlink(abs_path)
@@ -1404,8 +1419,14 @@ def _backup_existing(repo: str, rel: str, no_backup: bool) -> Optional[str]:
                 "cannot back up {0}: not a regular file "
                 "(FIFO/socket/device)".format(rel)
             )
-        with open(abs_path, "rb") as src, open(bak_path, "wb") as dst:
+        # Create 0600 and widen to the SOURCE's mode afterwards, rather than
+        # letting the umask pick: opening at the final mode would leave the
+        # secret world-readable for the length of the copy.
+        fd = os.open(bak_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with open(abs_path, "rb") as src, os.fdopen(fd, "wb") as dst:
             shutil.copyfileobj(src, dst, 1 << 16)
+        with contextlib.suppress(OSError):
+            os.chmod(bak_path, stat.S_IMODE(st.st_mode))
     return bak_path
 
 
@@ -1452,16 +1473,29 @@ def _write_blob_to_path(repo: str, spec: str, rel: str, mode: str) -> None:
     # any existing tmp first (the symlink branch above already does this).
     if os.path.lexists(tmp):
         os.unlink(tmp)
+    # git records only 100644/100755, so a naive restore re-creates the file at
+    # the umask default -- turning a 0600 `.env` into a world-readable 0644. Note
+    # the mode the file has RIGHT NOW and never end up more permissive than that.
+    prev_mode = None
+    with contextlib.suppress(OSError):
+        pst = os.lstat(abs_path)
+        if stat.S_ISREG(pst.st_mode):
+            prev_mode = stat.S_IMODE(pst.st_mode)
     try:
-        with open(tmp, "wb") as fh:
+        # 0600 while writing: the content is fully written before any wider mode
+        # is applied, so there is no window where a secret is world-readable.
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "wb") as fh:
             proc = gitutil.run_git_to_file(repo, ["cat-file", "blob", spec], fh)
         if proc.returncode != 0:
             raise RuntimeError("could not read {0} from snapshot".format(rel))
-        if mode == "100755":
-            st = os.stat(tmp)
-            os.chmod(
-                tmp, st.st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH
-            )
+        want = 0o755 if mode == "100755" else 0o644
+        if prev_mode is not None:
+            # Keep every owner bit (so an executable stays runnable) but grant no
+            # group/other bit the file did not already have.
+            want &= prev_mode | 0o700
+        with contextlib.suppress(OSError):
+            os.chmod(tmp, want)
         os.replace(tmp, abs_path)
     finally:
         if os.path.exists(tmp):
@@ -1867,16 +1901,14 @@ def _loose_object_count(repo: str) -> int:
         return 0
 
 
-def _tree_blobs(repo: str, ref: str) -> Dict[str, int]:
-    """``{blob_sha: size}`` for every blob in the snapshot tree.
-
-    Unlike :func:`_tree_bytes` (a logical sum), this keys by object id so a blob
-    shared across snapshots -- which git deduplicates on disk -- can be counted
-    once toward the ``max_bytes`` retention policy instead of N times.
-    """
-    raw = gitutil.run_git(repo, ["ls-tree", "-r", "-l", "-z", ref]).stdout
+def _one_tree_blobs(repo: str, rev: str) -> Dict[str, int]:
+    """``{blob_sha: size}`` for every blob reachable from one tree-ish."""
+    raw = gitutil.run_git(repo, ["ls-tree", "-r", "-l", "-z", rev],
+                          check=False)
+    if raw.returncode != 0:
+        return {}
     blobs: Dict[str, int] = {}
-    for record in raw.split(b"\x00"):
+    for record in raw.stdout.split(b"\x00"):
         if not record:
             continue
         meta, _sep, _path = record.partition(b"\t")
@@ -1888,6 +1920,33 @@ def _tree_blobs(repo: str, ref: str) -> Dict[str, int]:
                 blobs[sha] = int(parts[3])
             except ValueError:
                 pass
+    return blobs
+
+
+def _tree_blobs(repo: str, ref: str) -> Dict[str, int]:
+    """``{blob_sha: size}`` for every blob a snapshot RETAINS.
+
+    Unlike :func:`_tree_bytes` (a logical sum), this keys by object id so a blob
+    shared across snapshots -- which git deduplicates on disk -- can be counted
+    once toward the ``max_bytes`` retention policy instead of N times.
+
+    A snapshot retains TWO trees, not one: its own work-tree state, and the
+    staged-index variant carried as the commit's first parent (see
+    :func:`_staged_variant_tree`). Counting only the former let ``prune
+    --max-bytes`` keep an unbounded amount of staged-only content past the stated
+    limit -- the limit is a disk-usage promise, so it has to charge everything the
+    ref keeps alive. Keying by sha means the (usually large) overlap between the
+    two trees is still counted once.
+    """
+    blobs = _one_tree_blobs(repo, ref)
+    parent = gitutil.run_git(
+        repo, ["rev-parse", "-q", "--verify", "{0}^1^{{tree}}".format(ref)],
+        check=False,
+    )
+    if parent.returncode == 0:
+        staged = parent.stdout.decode("ascii", "replace").strip()
+        if staged:
+            blobs.update(_one_tree_blobs(repo, staged))
     return blobs
 
 

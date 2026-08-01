@@ -47,6 +47,20 @@ _GSP_CLUSTER_VALUE_OPTS=(
   ln    "t S"
   unzip "d x"
 )
+# Provably-no-write modes: recognising them keeps the preexec path from rehashing
+# the whole tree for a command that cannot touch it. Mirrors destructive.py
+# NO_WRITE_MODES. DELIBERATELY SMALL -- a false "safe" here means no snapshot
+# before real data loss. A truncating redirect is judged separately and still
+# fires, so the stdout modes stay safe to recognise.
+typeset -gA _GSP_NO_WRITE_LONG _GSP_NO_WRITE_LETTERS
+_GSP_NO_WRITE_LONG=(
+  rsync "--dry-run"
+  tar   "--to-stdout"
+)
+_GSP_NO_WRITE_LETTERS=(
+  rsync "n"
+  tar   "O"
+)
 typeset -ga _GSP_WRAPPERS=(env sudo doas time nohup command exec builtin \
   nice xargs timeout stdbuf setsid ionice)
 # wrapper -> space-padded list of options that consume a following value token,
@@ -70,10 +84,14 @@ _GSP_WRAPPER_VALOPTS=(
 # surrounding quotes (`"rm"`/`'rm'` -> `rm`). Without this the literal backslash /
 # quote chars survive zsh's `${(z)...}` split and the verb never matches.
 _gsp_unquote() {
-  local v="$1"
-  v="${v#\\}"
-  v="${v#[\"\']}"
-  v="${v%[\"\']}"
+  # `${(Q)}` removes quoting exactly the way zsh's own parser does, so ADJACENT
+  # quoted and unquoted fragments collapse into one word: `r'm'` -> `rm`.
+  # Stripping one leading/trailing quote by hand (the previous approach) left
+  # `r'm'` looking like a verb named `r'm'`, so `r'm' -rf notes` -- which really
+  # runs `rm -rf notes` -- was judged SAFE and no snapshot was taken. That is the
+  # dangerous direction of a detector disagreement, so it is worth matching zsh's
+  # own semantics rather than approximating them.
+  local v="${(Q)1}"
   print -r -- "$v"
 }
 
@@ -186,9 +204,33 @@ _git_safepoint_is_destructive() {
   # Split into segments on control operators / newlines and judge each segment's
   # head verb, so `make && rm -rf x` and multi-line scripts are seen too. (Quote
   # handling is best-effort; over-firing only costs an extra snapshot.)
-  local nl=$'\n'
-  local -a segs sw
-  segs=("${(@f)${cmd//[;&|]/$nl}}")
+  # Quote-AWARE segmentation. The previous form replaced every `;`/`&`/`|` in the
+  # raw string, including ones inside quotes, so `echo 'safe; rm mentioned'` was
+  # split into a bogus `rm mentioned` segment and fired. `${(z)}` splits into
+  # shell words using zsh's own parser, leaving control operators as their own
+  # words, so only REAL separators break a segment.
+  local -a segs sw _allw _segw
+  # `_gspw`, not `a`: the later `local seg verb sub a` would re-declare an
+  # already-set `a`, and zsh PRINTS a re-declared local -- dumping `a=notes` to
+  # stdout on every single command through preexec.
+  local _gspw
+  _allw=(${(z)cmd})
+  segs=()
+  _segw=()
+  for _gspw in "${_allw[@]}"; do
+    case "$_gspw" in
+      ';'|'&&'|'||'|'|'|'&'|';;'|'|&'|$'\n')
+        (( $#_segw )) && segs+=("${(j: :)${(q)_segw[@]}}")
+        _segw=()
+        ;;
+      # `${(Q)}` here, not later: zsh's parser is what knows that `r'm'` is one
+      # word meaning `rm`. Unquote at split time and re-quote with `${(q)}` when
+      # rejoining, so the segment string transports words containing spaces
+      # intact AND a single `${(Q)}` downstream lands on the real word.
+      *) _segw+=("${(Q)_gspw}") ;;
+    esac
+  done
+  (( $#_segw )) && segs+=("${(j: :)${(q)_segw[@]}}")
   local seg verb sub a
   for seg in $segs; do
     [[ -n "${seg// /}" ]] || continue
@@ -198,6 +240,49 @@ _git_safepoint_is_destructive() {
     # Normalize the verb BEFORE the destructive-verb / tee / inplace / git tests so
     # `\rm`, `"rm"`, `'rm'` match (mirrors destructive.py's posix-shlex).
     verb="$(_gsp_unquote "${sw[1]:t}")"
+    # Provably-no-write mode short-circuit (`rsync --dry-run`, `tar -xO`): return
+    # NOT-destructive before any trigger check, mirroring destructive.py. Same
+    # left-to-right cluster scan, so a letter inside an attached option VALUE
+    # (`tar -xvfnotes.tar`) is not misread as a flag.
+    if [[ -n "${_GSP_NO_WRITE_LETTERS[$verb]}" ]]; then
+      # NOTE the _nw* names: `local` on a variable that ALREADY exists in this
+      # scope makes zsh PRINT it, so reusing _tok/_cluster here would make the
+      # later cluster block's own `local` dump `_tok=-xvfnotes.tar` onto the
+      # user's terminal on every tar command.
+      local _nw _nwtok _nwcluster _nwidx=0
+      for _nw in ${=_GSP_NO_WRITE_LONG[$verb]}; do
+        for _nwtok in "${sw[@]:1}"; do
+          [[ "$_nwtok" == "$_nw" ]] && return 1
+        done
+      done
+      for _nwtok in "${sw[@]:1}"; do
+        (( _nwidx++ ))
+        _nwcluster=""
+        if [[ "$_nwtok" == --* ]]; then
+          continue
+        elif [[ "$_nwtok" == -* ]]; then
+          _nwcluster="${_nwtok#-}"
+        elif [[ "$verb" == tar && $_nwidx -eq 1 ]]; then
+          _nwcluster="$_nwtok"
+        else
+          continue
+        fi
+        [[ -n "$_nwcluster" ]] || continue
+        local _j=1 _c _stopnw=0
+        while (( _j <= ${#_nwcluster} )); do
+          _c="${_nwcluster[$_j]}"
+          for _nw in ${=_GSP_NO_WRITE_LETTERS[$verb]}; do
+            [[ "$_c" == "$_nw" ]] && return 1
+          done
+          for _nw in ${=_GSP_CLUSTER_VALUE_OPTS[$verb]}; do
+            [[ "$_c" == "$_nw" ]] && _stopnw=1 && break
+          done
+          (( _stopnw )) && break
+          [[ "$_c" == [A-Za-z] ]] || break
+          (( _j++ ))
+        done
+      done
+    fi
     if (( ${_GSP_VERBS[(Ie)$verb]} )); then
       return 0
     fi

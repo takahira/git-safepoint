@@ -197,6 +197,46 @@ _TRUNCATING_OPS = {">", ">|", "&>"}
 _NULL_TARGETS = {"/dev/null"}
 
 
+# Modes that make an otherwise-destructive verb provably write NOTHING to the
+# work tree. Recognising them avoids a full-tree rehash on the preexec path for a
+# command that cannot lose data. Kept DELIBERATELY SMALL: a false "safe" here
+# means no snapshot before real data loss, so only unambiguous, well-known
+# no-write switches belong in this table -- never a heuristic.
+#
+# A truncating redirect (``tar -xOf a.tar f > out``) is checked separately and
+# still fires, so the stdout modes stay safe to recognise.
+#   verb -> (long options, short cluster letters)
+NO_WRITE_MODES: "dict[str, tuple[set[str], set[str]]]" = {
+    "rsync": ({"--dry-run"}, {"n"}),
+    "tar": ({"--to-stdout"}, {"O"}),
+}
+
+
+def _has_no_write_mode(verb: str, tokens: List[str]) -> bool:
+    """True when this invocation carries a provably-no-write mode for ``verb``."""
+    spec = NO_WRITE_MODES.get(verb)
+    if not spec:
+        return False
+    long_opts, letters = spec
+    value_opts = _CLUSTER_VALUE_OPTS.get(verb, set())
+    for index, t in enumerate(tokens[1:], start=1):
+        if t in long_opts:
+            return True
+        if t.startswith("--"):
+            continue
+        if t.startswith("-"):
+            cluster = t[1:]
+        elif verb == "tar" and index == 1:
+            cluster = t          # tar's dashless leading bundle: ``tar xOf a.tar``
+        else:
+            continue
+        # Same left-to-right scan as the trigger side, so a letter sitting inside
+        # an attached option VALUE (``tar -xvfnotes.tar``) is not read as a flag.
+        if _cluster_triggers(cluster, letters, value_opts):
+            return True
+    return False
+
+
 def _split_lines(command: str) -> List[str]:
     """Split on UNQUOTED newlines into statements.
 
@@ -393,6 +433,12 @@ def segment_is_destructive(tokens: List[str]) -> bool:
     if not tokens:
         return False
     verb = os.path.basename(tokens[0]) if "/" in tokens[0] else tokens[0]
+    # A provably-no-write mode (``rsync --dry-run``, ``tar -xO``) short-circuits
+    # BEFORE any trigger check: the command cannot touch the work tree, so making
+    # the preexec path rehash the whole tree first is pure waste. A truncating
+    # redirect is judged separately and still fires.
+    if _has_no_write_mode(verb, tokens):
+        return False
     if verb in DESTRUCTIVE_VERBS:
         return True
     # File-overwriting verbs that truncate an arg unless an append flag is given.

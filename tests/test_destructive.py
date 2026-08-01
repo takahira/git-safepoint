@@ -2,6 +2,9 @@
 # -*- coding: utf-8 -*-
 """Head-verb destructive detection."""
 import os
+import subprocess
+import shutil
+import shlex
 import re
 import unittest
 
@@ -411,3 +414,140 @@ class OverwriteClass(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NoWriteModeTest(unittest.TestCase):
+    """A provably-no-write invocation must not force a full-tree rehash, and a
+    real one must still fire. The table is deliberately tiny: a false 'safe' here
+    means NO snapshot before real data loss."""
+
+    SAFE = ("rsync -avn src/ dst/", "rsync --dry-run src/ dst/",
+            "rsync -n --delete src/ dst/",
+            "tar -xOf archive.tar f", "tar xOf archive.tar f",
+            "tar --to-stdout -xf archive.tar")
+    FIRES = ("rsync -av src/ dst/", "rsync -av --delete src/ dst/",
+             "tar -xf archive.tar", "tar -xvfnotes.tar",
+             # a no-write mode does NOT excuse a truncating redirect
+             "rsync -avn src/ dst/ > out.txt",
+             "tar -xOf archive.tar f > out.txt")
+
+    def test_no_write_modes_do_not_fire(self):
+        for cmd in self.SAFE:
+            self.assertFalse(destructive.looks_destructive(cmd), cmd)
+
+    def test_real_invocations_still_fire(self):
+        for cmd in self.FIRES:
+            self.assertTrue(destructive.looks_destructive(cmd), cmd)
+
+    def test_letter_inside_an_attached_value_is_not_a_mode(self):
+        """`-xvfnotes.tar` has an 'O'-free name, but the scan must stop at `f`
+        rather than reading later characters as flags in either direction."""
+        self.assertTrue(destructive.looks_destructive("tar -xvfOut.tar"))
+
+    def test_no_write_table_is_mirrored_in_the_zsh_adapter(self):
+        path = os.path.join(helpers.PKG_ROOT, "adapters",
+                            "git-safepoint-preexec.zsh")
+        with open(path, encoding="utf-8") as fh:
+            zsh = fh.read()
+        long_opts = _parse_zsh_assoc(zsh, "_GSP_NO_WRITE_LONG")
+        letters = _parse_zsh_assoc(zsh, "_GSP_NO_WRITE_LETTERS")
+        self.assertEqual(
+            long_opts,
+            {k: v[0] for k, v in destructive.NO_WRITE_MODES.items()})
+        self.assertEqual(
+            letters,
+            {k: v[1] for k, v in destructive.NO_WRITE_MODES.items()})
+
+
+@unittest.skipIf(shutil.which("zsh") is None, "zsh not installed")
+class ZshAdapterBehaviourParityTest(unittest.TestCase):
+    """The table-sync tests prove the two sides carry the same DATA. They cannot
+    see a parsing divergence, which is where the real risk is: zsh judging a
+    command safe that Python judges destructive means NO snapshot is taken before
+    real data loss, and the preexec path has no conservative fallback.
+
+    Two such divergences were live before this test existed:
+      - `r'm' -rf notes` runs `rm -rf notes` in zsh (adjacent quoted and unquoted
+        fragments are one word), but the adapter stripped a single quote by hand
+        and saw a verb literally named `r'm'` -> judged SAFE.
+      - `echo 'safe; rm mentioned'` fired, because segments were split by
+        replacing every `;` in the raw string, quotes included.
+    """
+
+    CASES = [
+        # quoting of the verb -- all five forms run `rm`
+        "rm -rf notes", "r'm' -rf notes", "\\rm -rf notes", "'rm' -rf notes",
+        '"rm" -rf x',
+        # separators inside quotes are not separators
+        "echo 'safe; rm mentioned'", 'echo "a && rm b"', 'echo "rm -rf /"',
+        "grep -r 'rm -rf' .", "echo 'a;b' && ls",
+        # real separators still split
+        "make && rm -rf build", "make; rm -rf build", "make || rm -rf build",
+        "if true; then rm -rf x; fi", "for f in *; do rm $f; done",
+        # wrappers
+        "sudo rm -rf /tmp/x", "env FOO=1 rm x", "timeout 5 rm x",
+        "nice -n 10 rm x", "xargs rm",
+        # words containing spaces survive segmentation
+        "cp 'my file.txt' 'other file.txt'", "rm 'file with space'",
+        # git / in-place editors
+        "git checkout .", "git status", "git stash list", "git branch -D x",
+        "sed -i.bak s/a/b/ f", "sed s/a/b/ f", "perl -i -pe s/a/b/ f",
+        "awk '{print}' f",
+        # overwrite class + clusters + attached values
+        "cp new old", "mv a b", "install -m 755 a b", "rsync -av s d",
+        "tar -xf a.tar", "tar -cf a.tar d", "tar -tf a.tar",
+        "tar -xvfnotes.tar", "tar -tvfxyz.tar", "tar -xvfOut.tar",
+        "ln -sf a b", "ln -s a b", "unzip -o a.zip", "unzip a.zip",
+        # no-write modes
+        "rsync -avn s d", "rsync --dry-run s d", "rsync -n --delete s d",
+        "tar -xOf a.tar f", "tar xOf a.tar f", "tar --to-stdout -xf a.tar",
+        # redirects (judged separately, and they override a no-write mode)
+        "echo x > out.txt", "echo x >> out.txt", "echo x > /dev/null",
+        "echo x 2>&1", "rsync -avn s d > out.txt", "tar -xOf a.tar f > out.txt",
+        # misc
+        "cat a | tee b", "cat a | tee -a b", "tee /dev/null", "ls | grep x",
+        "echo hello", "truncate -s 0 f", "dd if=a of=b", "shred f", "gzip f",
+        "xz f", "patch < p.diff",
+    ]
+
+    @classmethod
+    def setUpClass(cls):
+        adapter = os.path.join(
+            helpers.PKG_ROOT, "adapters", "git-safepoint-preexec.zsh"
+        )
+        driver = (
+            "source {0}\n"
+            "while IFS= read -r line; do\n"
+            "  if _git_safepoint_is_destructive \"$line\"; then echo 1; "
+            "else echo 0; fi\n"
+            "done\n"
+        ).format(shlex.quote(adapter))
+        proc = subprocess.run(
+            ["zsh", "-c", driver],
+            input="\n".join(cls.CASES) + "\n",
+            capture_output=True, text=True,
+        )
+        cls.proc = proc
+        cls.zsh_results = proc.stdout.strip().split("\n") if proc.stdout else []
+
+    def test_adapter_emits_nothing_on_stdout_but_the_verdicts(self):
+        """A stray `local` on an already-declared variable makes zsh PRINT it.
+        That output lands on the user's terminal on every command through
+        preexec, and it silently desynchronises this very comparison."""
+        self.assertEqual(
+            len(self.zsh_results), len(self.CASES),
+            "adapter wrote extra lines to stdout: {0!r}".format(
+                self.proc.stdout[:400]),
+        )
+
+    def test_python_and_zsh_agree_on_every_case(self):
+        mismatches = [
+            (cmd, destructive.looks_destructive(cmd), res == "1")
+            for cmd, res in zip(self.CASES, self.zsh_results)
+            if destructive.looks_destructive(cmd) != (res == "1")
+        ]
+        self.assertEqual(
+            mismatches, [],
+            "\n".join("  {0!r}: python={1} zsh={2}".format(*m)
+                      for m in mismatches),
+        )

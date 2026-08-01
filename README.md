@@ -273,9 +273,12 @@ cold re-hash — not ref-store corruption. Keep `.git` on a local filesystem for
 guaranteed serialization.
 
 **Local metadata leak.** Two minor, local-only caveats: a snapshot's commit
-message records the (truncated) triggering command **verbatim — there is no
-redaction**, so avoid putting a secret directly on a destructive command line
-(e.g. `... --token=…`); and a snapshot of a symlink
+message records the (truncated) triggering command with **best-effort
+redaction** — common credential shapes (`--token=…`, `Authorization:` headers,
+`-p<password>`, known vendor token prefixes) are masked, but the masking works
+from a pattern list, so a secret in a shape it does not recognise is still
+written verbatim. Treat it as a safety net, not a guarantee, and avoid putting a
+secret directly on a destructive command line; and a snapshot of a symlink
 stores the link's *target path string* (never the secret's bytes). A normal push
 (`refs/heads` / `refs/tags`) does not transfer `refs/snapshots/`, so this stays
 on your machine by default — but `git push --mirror`, `git clone --mirror`, and

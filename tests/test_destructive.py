@@ -444,6 +444,54 @@ class NoWriteModeTest(unittest.TestCase):
         rather than reading later characters as flags in either direction."""
         self.assertTrue(destructive.looks_destructive("tar -xvfOut.tar"))
 
+    def test_no_write_mode_only_excuses_its_own_segment(self):
+        """The dry-run-then-apply pattern must still snapshot.
+
+        A no-write mode proves nothing about a LATER segment, so a leading
+        `rsync -n` / `tar -xO` must not make the whole command look safe.
+        """
+        for cmd in ("rsync -n src/ dst/ && rsync src/ dst/",
+                    "rsync -n --delete src/ dst/ && rm -rf notes",
+                    "tar -xOf a.tar f && rm -rf notes",
+                    "rsync --dry-run a b; git reset --hard"):
+            self.assertTrue(destructive.looks_destructive(cmd), cmd)
+
+    def test_letters_inside_a_value_option_are_not_no_write_flags(self):
+        """A glued option VALUE must not be scanned for mode letters.
+
+        `-e`'s value ends in an `n` and `-g`'s in an `O`; reading those as
+        --dry-run / --to-stdout would skip the snapshot before a real write.
+        """
+        for cmd in ("rsync -eplink src/ dst/",
+                    "tar -gOLD.snar -xf backup.tar"):
+            self.assertTrue(destructive.looks_destructive(cmd), cmd)
+
+    def test_dashless_bundle_is_not_cut_short_by_a_value_option(self):
+        """tar's old dashless form glues no values on.
+
+        Values arrive as later arguments, so stopping the scan at a
+        value-taking letter would hide every flag behind it -- `g` would mask
+        the `x` in `tar gxf OLD.snar backup.tar`, which really extracts.
+        """
+        self.assertTrue(destructive.looks_destructive("tar gxf OLD.snar backup.tar"))
+        self.assertTrue(destructive.looks_destructive("tar xzf a.tar"))
+        # The dashed form must keep stopping at the glued value.
+        self.assertFalse(destructive.looks_destructive("tar -tvfxyz.tar"))
+
+    def test_mode_options_are_not_recognised_after_end_of_options(self):
+        """`--` ends option parsing, so a later `--dry-run` is a file name."""
+        self.assertTrue(destructive.looks_destructive("rsync -- src/ --dry-run"))
+        # Before the marker it is still a real mode.
+        self.assertFalse(destructive.looks_destructive("rsync -n -- src/ dst/"))
+
+    def test_value_option_tables_are_mirrored_in_the_zsh_adapter(self):
+        path = os.path.join(helpers.PKG_ROOT, "adapters",
+                            "git-safepoint-preexec.zsh")
+        with open(path, encoding="utf-8") as fh:
+            zsh = fh.read()
+        mirrored = _parse_zsh_assoc(zsh, "_GSP_CLUSTER_VALUE_OPTS")
+        self.assertEqual(mirrored, destructive._CLUSTER_VALUE_OPTS)
+
     def test_no_write_table_is_mirrored_in_the_zsh_adapter(self):
         path = os.path.join(helpers.PKG_ROOT, "adapters",
                             "git-safepoint-preexec.zsh")
@@ -501,6 +549,17 @@ class ZshAdapterBehaviourParityTest(unittest.TestCase):
         # no-write modes
         "rsync -avn s d", "rsync --dry-run s d", "rsync -n --delete s d",
         "tar -xOf a.tar f", "tar xOf a.tar f", "tar --to-stdout -xf a.tar",
+        # a no-write mode excuses ONLY its own segment
+        "rsync -n s d && rsync s d", "rsync -n --delete s d && rm -rf notes",
+        "tar -xOf a.tar f && rm -rf notes", "rsync --dry-run a b; git reset --hard",
+        "rsync -n a b && echo done",
+        # mode letters sitting inside a glued option VALUE are not flags
+        "rsync -eplink s d", "tar -gOLD.snar -xf backup.tar",
+        "rsync -e ssh s d", "tar -g snap.snar -xf backup.tar",
+        # ...but the dashless bundle glues nothing on, so it must not stop early
+        "tar gxf OLD.snar backup.tar", "tar xzf a.tar",
+        # `--` ends option parsing
+        "rsync -- src/ --dry-run", "rsync -n -- src/ dst/",
         # redirects (judged separately, and they override a no-write mode)
         "echo x > out.txt", "echo x >> out.txt", "echo x > /dev/null",
         "echo x 2>&1", "rsync -avn s d > out.txt", "tar -xOf a.tar f > out.txt",

@@ -99,7 +99,18 @@ def _child_env(extra_env: Optional[Dict[str, str]] = None) -> Dict[str, str]:
 # output is already verbatim, so this is harmless there; it only fixes the
 # human-readable / line-parsed forms. (Embedded newlines/tabs still require
 # ``-z`` -- quotePath alone does not help line-based parsing.)
-_GLOBAL_CONFIG = ["-c", "core.quotePath=false"]
+#
+# ``--literal-pathspecs`` disables pathspec MAGIC for every invocation. Every
+# path this tool passes comes from the filesystem, never from a user-written
+# pattern, so magic can only ever make a filename mean something other than
+# itself. Capture is already immune (it feeds paths through
+# ``--pathspec-from-file`` + ``--pathspec-file-nul``, which git reads verbatim),
+# but the single-path operands after ``--`` are not: ``ls-tree``/``diff`` for
+# one file is how single-file restore and diff resolve their target, and a file
+# named ``:(glob)**`` there aborts with "pathspec magic not supported by this
+# command" while one named ``*`` globs onto its siblings. Env-var equivalents
+# (GIT_*_PATHSPECS) are scrubbed in ``_child_env``; this closes the argument side.
+_GLOBAL_CONFIG = ["-c", "core.quotePath=false", "--literal-pathspecs"]
 
 # Restore writes pre-overwrite copies here (work-tree relative). It must never
 # be captured, or every restore would re-snapshot the previous backup and the

@@ -108,9 +108,16 @@ DESTRUCTIVE_CLUSTER_FLAG_CMDS: "dict[str, set[str]]" = {
 # real flags even when the rest of the token is not alphabetic, which is why
 # ``tar -xvfbackup.tar`` (a genuine extraction) must still fire.
 _CLUSTER_VALUE_OPTS: "dict[str, set[str]]" = {
-    "tar": set("fbCTXIFKs"),
+    # ``g`` is GNU tar's --listed-incremental=FILE: without it, the ``O`` inside
+    # ``tar -gOLD.snar -xf backup.tar`` reads as --to-stdout and the extraction
+    # looks provably-no-write.
+    "tar": set("fbCTXIFKsg"),
     "ln": set("tS"),
     "unzip": set("dx"),
+    # rsync takes no cluster trigger flags, but its no-write scan needs the same
+    # stop list: ``-e``'s value in ``rsync -eplink src/ dst/`` ends in an ``n``
+    # that would otherwise read as --dry-run.
+    "rsync": set("efBTM"),
 }
 
 # Wrapper commands to peel off before reading the real verb. These run the
@@ -228,19 +235,30 @@ def _has_no_write_mode(verb: str, tokens: List[str]) -> bool:
     long_opts, letters = spec
     value_opts = _CLUSTER_VALUE_OPTS.get(verb, set())
     for index, t in enumerate(tokens[1:], start=1):
+        # ``--`` ends option parsing: everything after it is an operand, so a
+        # later ``--dry-run`` is a FILE NAME (``rsync -- src/ --dry-run`` really
+        # copies) and must not be read as a mode.
+        if t == "--":
+            break
         if t in long_opts:
             return True
         if t.startswith("--"):
             continue
         if t.startswith("-"):
             cluster = t[1:]
+            stop_at = value_opts
         elif verb == "tar" and index == 1:
             cluster = t          # tar's dashless leading bundle: ``tar xOf a.tar``
+            # In the old dashless form every letter is an option and its value
+            # arrives as a LATER argument, so nothing is glued on. Stopping at a
+            # value-taking letter here would hide the flags behind it -- with
+            # ``tar gxf OLD.snar backup.tar`` the ``g`` would mask the ``x``.
+            stop_at = frozenset()
         else:
             continue
         # Same left-to-right scan as the trigger side, so a letter sitting inside
         # an attached option VALUE (``tar -xvfnotes.tar``) is not read as a flag.
-        if _cluster_triggers(cluster, letters, value_opts):
+        if _cluster_triggers(cluster, letters, stop_at):
             return True
     return False
 
@@ -516,18 +534,26 @@ def segment_is_destructive(tokens: List[str]) -> bool:
         spec = DESTRUCTIVE_CLUSTER_FLAG_CMDS[verb]
         letters = {s for s in spec if not s.startswith("--")}
         long_opts = {s for s in spec if s.startswith("--")}
+        value_opts = _CLUSTER_VALUE_OPTS.get(verb, set())
         for index, t in enumerate(tokens[1:], start=1):
+            if t == "--":
+                break
             if t in long_opts:
                 return True
             if t.startswith("--"):
                 continue
             if t.startswith("-"):
                 cluster = t[1:]
+                stop_at = value_opts
             elif verb == "tar" and index == 1:
                 cluster = t
+                # Dashless old-option bundle: values are separate arguments, so
+                # nothing is glued on and stopping early would hide a trigger
+                # (``tar gxf OLD.snar backup.tar`` extracts).
+                stop_at = frozenset()
             else:
                 continue
-            if _cluster_triggers(cluster, letters, _CLUSTER_VALUE_OPTS.get(verb, set())):
+            if _cluster_triggers(cluster, letters, stop_at):
                 return True
     return False
 

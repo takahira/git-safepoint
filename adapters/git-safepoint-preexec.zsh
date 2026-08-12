@@ -50,9 +50,10 @@ _GSP_CLUSTER_FLAGS=(
 # flag). Mirrors destructive.py _CLUSTER_VALUE_OPTS.
 typeset -gA _GSP_CLUSTER_VALUE_OPTS
 _GSP_CLUSTER_VALUE_OPTS=(
-  tar   "f b C T X I F K s"
+  tar   "f b C T X I F K s g"
   ln    "t S"
   unzip "d x"
+  rsync "e f B T M"
 )
 # Provably-no-write modes: recognising them keeps the preexec path from rehashing
 # the whole tree for a command that cannot touch it. Mirrors destructive.py
@@ -203,6 +204,69 @@ _git_safepoint_has_truncating_redirect() {
   return 1
 }
 
+# True (0) when THIS segment carries a provably-no-write mode for its verb
+# (`rsync --dry-run`, `tar -xO`). Mirrors destructive.py's _has_no_write_mode,
+# which is scoped to a SINGLE segment: the caller must skip to the next segment,
+# never declare the whole command safe.
+#
+# Declaring the locals once here (rather than inside the caller's per-token loop)
+# also keeps zsh from PRINTING them: `local` on a name that already exists in the
+# same scope dumps its value to the user's terminal.
+_gsp_seg_has_no_write() {
+  local verb="$1"
+  shift
+  [[ -n "${_GSP_NO_WRITE_LETTERS[$verb]}" ]] || return 1
+  local _nw _nwtok _nwcluster _nwidx=0 _j _c _stopnw
+  # Long options are matched in the SAME left-to-right pass that honours `--`;
+  # a separate all-tokens scan would find `--dry-run` even when it sits after
+  # the end-of-options marker and is therefore a file name.
+  for _nwtok in "$@"; do
+    [[ "$_nwtok" == "--" ]] && break
+    for _nw in ${=_GSP_NO_WRITE_LONG[$verb]}; do
+      [[ "$_nwtok" == "$_nw" ]] && return 0
+    done
+  done
+  local _dashless
+  for _nwtok in "$@"; do
+    (( _nwidx++ ))
+    # `--` ends option parsing: a later `--dry-run` is a FILE NAME.
+    [[ "$_nwtok" == "--" ]] && break
+    _nwcluster=""
+    _dashless=0
+    if [[ "$_nwtok" == --* ]]; then
+      continue
+    elif [[ "$_nwtok" == -* ]]; then
+      _nwcluster="${_nwtok#-}"
+    elif [[ "$verb" == tar && $_nwidx -eq 1 ]]; then
+      # Old dashless bundle: values are separate arguments, so no letter is
+      # glued on and the value-option stop must not apply (`tar gxf OLD.snar
+      # backup.tar` would otherwise hide the `x`).
+      _nwcluster="$_nwtok"
+      _dashless=1
+    else
+      continue
+    fi
+    [[ -n "$_nwcluster" ]] || continue
+    _j=1
+    _stopnw=0
+    while (( _j <= ${#_nwcluster} )); do
+      _c="${_nwcluster[$_j]}"
+      for _nw in ${=_GSP_NO_WRITE_LETTERS[$verb]}; do
+        [[ "$_c" == "$_nw" ]] && return 0
+      done
+      if (( ! _dashless )); then
+        for _nw in ${=_GSP_CLUSTER_VALUE_OPTS[$verb]}; do
+          [[ "$_c" == "$_nw" ]] && _stopnw=1 && break
+        done
+        (( _stopnw )) && break
+      fi
+      [[ "$_c" == [A-Za-z] ]] || break
+      (( _j++ ))
+    done
+  done
+  return 1
+}
+
 _git_safepoint_is_destructive() {
   local cmd="$1"
   if _git_safepoint_has_truncating_redirect "$cmd"; then
@@ -238,7 +302,12 @@ _git_safepoint_is_destructive() {
     esac
   done
   (( $#_segw )) && segs+=("${(j: :)${(q)_segw[@]}}")
+  # Declared ONCE for the whole function, not per segment: `local` on a name
+  # that already exists in this scope makes zsh echo it, so re-declaring inside
+  # the `for seg` loop dumps `_spec=f`, `_ch=f`, ... onto the user's terminal on
+  # any multi-segment command (`tar -tf a.tar && tar -tf b.tar`).
   local seg verb sub a
+  local _spec _tok _cluster _idx _hit _i _ch _stop _dashlessc
   for seg in $segs; do
     [[ -n "${seg// /}" ]] || continue
     _git_safepoint_strip_wrappers "$seg"
@@ -247,48 +316,13 @@ _git_safepoint_is_destructive() {
     # Normalize the verb BEFORE the destructive-verb / tee / inplace / git tests so
     # `\rm`, `"rm"`, `'rm'` match (mirrors destructive.py's posix-shlex).
     verb="$(_gsp_unquote "${sw[1]:t}")"
-    # Provably-no-write mode short-circuit (`rsync --dry-run`, `tar -xO`): return
-    # NOT-destructive before any trigger check, mirroring destructive.py. Same
-    # left-to-right cluster scan, so a letter inside an attached option VALUE
-    # (`tar -xvfnotes.tar`) is not misread as a flag.
-    if [[ -n "${_GSP_NO_WRITE_LETTERS[$verb]}" ]]; then
-      # NOTE the _nw* names: `local` on a variable that ALREADY exists in this
-      # scope makes zsh PRINT it, so reusing _tok/_cluster here would make the
-      # later cluster block's own `local` dump `_tok=-xvfnotes.tar` onto the
-      # user's terminal on every tar command.
-      local _nw _nwtok _nwcluster _nwidx=0
-      for _nw in ${=_GSP_NO_WRITE_LONG[$verb]}; do
-        for _nwtok in "${sw[@]:1}"; do
-          [[ "$_nwtok" == "$_nw" ]] && return 1
-        done
-      done
-      for _nwtok in "${sw[@]:1}"; do
-        (( _nwidx++ ))
-        _nwcluster=""
-        if [[ "$_nwtok" == --* ]]; then
-          continue
-        elif [[ "$_nwtok" == -* ]]; then
-          _nwcluster="${_nwtok#-}"
-        elif [[ "$verb" == tar && $_nwidx -eq 1 ]]; then
-          _nwcluster="$_nwtok"
-        else
-          continue
-        fi
-        [[ -n "$_nwcluster" ]] || continue
-        local _j=1 _c _stopnw=0
-        while (( _j <= ${#_nwcluster} )); do
-          _c="${_nwcluster[$_j]}"
-          for _nw in ${=_GSP_NO_WRITE_LETTERS[$verb]}; do
-            [[ "$_c" == "$_nw" ]] && return 1
-          done
-          for _nw in ${=_GSP_CLUSTER_VALUE_OPTS[$verb]}; do
-            [[ "$_c" == "$_nw" ]] && _stopnw=1 && break
-          done
-          (( _stopnw )) && break
-          [[ "$_c" == [A-Za-z] ]] || break
-          (( _j++ ))
-        done
-      done
+    # A provably-no-write mode (`rsync --dry-run`, `tar -xO`) makes THIS segment
+    # harmless, but the command can still carry a destructive later segment
+    # (`rsync -n src/ dst/ && rm -rf notes`), so skip to the next segment rather
+    # than declaring the whole command safe. destructive.py scopes the identical
+    # short-circuit to segment_is_destructive for exactly this reason.
+    if _gsp_seg_has_no_write "$verb" "${sw[@]:1}"; then
+      continue
     fi
     if (( ${_GSP_VERBS[(Ie)$verb]} )); then
       return 0
@@ -319,7 +353,8 @@ _git_safepoint_is_destructive() {
     # read only from the FIRST argument so an ordinary all-alpha filename
     # containing the trigger letter (`tar -tf box`) cannot fire.
     if [[ -n "${_GSP_CLUSTER_FLAGS[$verb]}" ]]; then
-      local _spec _tok _cluster _idx=0 _hit=0
+      _idx=0
+      _hit=0
       for _spec in ${=_GSP_CLUSTER_FLAGS[$verb]}; do
         for _tok in "${sw[@]:1}"; do
           [[ "$_spec" == --* && "$_tok" == "$_spec" ]] && _hit=1 && break
@@ -329,13 +364,16 @@ _git_safepoint_is_destructive() {
       (( _hit )) && return 0
       for _tok in "${sw[@]:1}"; do
         (( _idx++ ))
+        [[ "$_tok" == "--" ]] && break
         _cluster=""
+        _dashlessc=0
         if [[ "$_tok" == --* ]]; then
           continue
         elif [[ "$_tok" == -* ]]; then
           _cluster="${_tok#-}"
         elif [[ "$verb" == tar && $_idx -eq 1 ]]; then
           _cluster="$_tok"
+          _dashlessc=1
         else
           continue
         fi
@@ -343,17 +381,20 @@ _git_safepoint_is_destructive() {
         # 左から 1 文字ずつ見て、トリガー文字なら発火、値を食うオプション
         # (tar の f 等) に当たったらそこで打ち切る。`-xvfbackup.tar` は x が f
         # より前なので発火し、`-tvfxyz.tar` は f で止まるので発火しない。
-        local _i=1 _ch _stop=0
+        _i=1
+        _stop=0
         while (( _i <= ${#_cluster} )); do
           _ch="${_cluster[$_i]}"
           for _spec in ${=_GSP_CLUSTER_FLAGS[$verb]}; do
             [[ "$_spec" == --* ]] && continue
             [[ "$_ch" == "$_spec" ]] && return 0
           done
-          for _spec in ${=_GSP_CLUSTER_VALUE_OPTS[$verb]}; do
-            [[ "$_ch" == "$_spec" ]] && _stop=1 && break
-          done
-          (( _stop )) && break
+          if (( ! _dashlessc )); then
+            for _spec in ${=_GSP_CLUSTER_VALUE_OPTS[$verb]}; do
+              [[ "$_ch" == "$_spec" ]] && _stop=1 && break
+            done
+            (( _stop )) && break
+          fi
           # オプション束でない文字（パス・数字）に当たったら打ち切る
           [[ "$_ch" == [a-zA-Z] ]] || break
           (( _i++ ))
@@ -385,16 +426,86 @@ _git_safepoint_is_destructive() {
   return 1
 }
 
+# Print the work tree that `git worktree remove <path>` is about to delete.
+#
+# This is the one destructive command whose data loss happens OUTSIDE the
+# current work tree, so snapshotting `--show-toplevel` would faithfully capture
+# a tree that is not in danger while the doomed one -- including its dirty and
+# untracked files -- goes unprotected. Returns non-zero when the command is not
+# a worktree removal, leaving the caller on the current repo.
+_gsp_worktree_remove_target() {
+  local -a toks
+  toks=(${(z)1})
+  local n=$#toks i j k t sub target b saw_git
+  for (( i = 1; i <= n; i++ )); do
+    [[ "$(_gsp_unquote "${toks[$i]}")" == worktree ]] || continue
+    # `worktree` must be THIS segment's git subcommand, not just any word on the
+    # line: `echo worktree remove /tmp/wt && rm notes` would otherwise redirect
+    # the snapshot to /tmp/wt and leave the `rm` unprotected. Scan back to the
+    # nearest command separator and require a `git` verb in that window.
+    saw_git=0
+    for (( b = i - 1; b >= 1; b-- )); do
+      t="$(_gsp_unquote "${toks[$b]}")"
+      case "$t" in
+        '&&'|'||'|';'|';;'|'|'|'|&'|'&'|$'\n') break ;;
+      esac
+      [[ "${t:t}" == git ]] && saw_git=1 && break
+    done
+    (( saw_git )) || continue
+    # First non-flag word after `worktree` is the subcommand.
+    sub=""
+    for (( j = i + 1; j <= n; j++ )); do
+      t="$(_gsp_unquote "${toks[$j]}")"
+      [[ "$t" == -* ]] && continue
+      sub="$t"
+      break
+    done
+    [[ "$sub" == remove ]] || continue
+    # `remove` takes exactly ONE <worktree> operand, so take the FIRST non-flag
+    # word and stop at the first command separator. Taking the last one instead
+    # walks straight past `&&`/`;`/`|` into the next command and picks up its
+    # arguments (`git worktree remove ../wt && echo done` yielded `done`, which
+    # resolves to no repo and silently fell back to snapshotting the wrong tree).
+    target=""
+    for (( k = j + 1; k <= n; k++ )); do
+      t="$(_gsp_unquote "${toks[$k]}")"
+      case "$t" in
+        '&&'|'||'|';'|';;'|'|'|'|&'|'&'|$'\n') break ;;
+      esac
+      [[ "$t" == -* ]] && continue
+      target="$t"
+      break
+    done
+    if [[ -n "$target" ]]; then
+      print -r -- "$target"
+      return 0
+    fi
+  done
+  return 1
+}
+
 git_safepoint_preexec() {
   local cmd="$1"
   # Only inside a git work tree.
   git rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 0
   if _git_safepoint_is_destructive "$cmd"; then
-    local repo
+    local repo wt wtop
     repo="$(git rev-parse --show-toplevel 2>/dev/null)"
     [[ -n "$repo" ]] || return 0
     python3 "$GIT_SAFEPOINT_PY" --repo "$repo" snapshot \
       --via preexec --label "pre-shell: ${cmd}" --quiet 2>/dev/null
+    # `git worktree remove <path>` destroys files in ANOTHER work tree, which the
+    # snapshot above does not cover. Protect that tree IN ADDITION -- never
+    # instead: a compound line can lose data on both sides
+    # (`rm notes && git worktree remove ../wt`), so replacing the current repo
+    # here would trade one gap for another.
+    if wt="$(_gsp_worktree_remove_target "$cmd")" && [[ -n "$wt" ]]; then
+      wtop="$(git -C "$wt" rev-parse --show-toplevel 2>/dev/null)"
+      if [[ -n "$wtop" && "$wtop" != "$repo" ]]; then
+        python3 "$GIT_SAFEPOINT_PY" --repo "$wtop" snapshot \
+          --via preexec --label "pre-shell: ${cmd}" --quiet 2>/dev/null
+      fi
+    fi
   fi
   return 0  # never block the command
 }

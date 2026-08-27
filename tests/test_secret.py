@@ -151,6 +151,22 @@ class H2SecretFloorTest(unittest.TestCase):
         self.assertIn("id_rsa", kept, "tracked secret is exempt (H2)")
         self.assertIn("id_dsa", dropped, "untracked secret still dropped")
 
+    def test_tracked_secrets_exempt_regardless_of_worktree_status(self):
+        helpers.write_file(self.repo, ".env", "PLACEHOLDER=committed")
+        helpers.write_file(self.repo, "server.pem", "COMMITTED-PRIVATE-KEY")
+        helpers.git(self.repo, "add", ".env", "server.pem")
+        helpers.git(self.repo, "commit", "-qm", "track secrets")
+        helpers.write_file(self.repo, ".env", "TOKEN=locally-modified")
+        helpers.git(self.repo, "update-index", "--assume-unchanged", "server.pem")
+        helpers.write_file(self.repo, "server.pem", "LOCALLY-MODIFIED-PRIVATE-KEY")
+
+        kept, dropped = gitutil.list_worktree_files(self.repo)
+
+        self.assertIn(".env", kept)
+        self.assertIn("server.pem", kept)
+        self.assertNotIn(".env", dropped)
+        self.assertNotIn("server.pem", dropped)
+
 
 # --------------------------------------------------------------------------- C2
 

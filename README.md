@@ -105,6 +105,15 @@ git-safepoint --repo . prune --keep-generations 50 --dry-run
 
 From a clone (no install), replace `git-safepoint` with `python3 git_safepoint.py`.
 
+The `snapshot` subcommand has four exit codes:
+
+| Code | Meaning |
+|-----:|---------|
+| 0 | A snapshot was recorded. |
+| 1 | No snapshot was recorded, and the work tree is not protected. |
+| 2 | `--repo` is not a Git work tree. |
+| 3 | No snapshot was recorded because the work tree is already protected; nothing needed recording. |
+
 ---
 
 ## Claude Code hook (auto-capture before every tool call)
@@ -198,7 +207,7 @@ mtime cache is per worktree:
 - `seq` — monotonic counter for collision-free IDs across concurrent processes and linked worktrees
 - `lock` — per-repo `flock` (shared across linked worktrees) so parallel hook fires don't corrupt
 
-**Secrets** (`.env`, `*.pem`, `id_rsa`, `*.key`, `*firebase-adminsdk*.json`, etc.) are excluded from snapshots — **for untracked files**. The floor's job is to keep an untracked secret out of the object store; a file already **tracked by git** is exempt (its blob is already committed, so snapshotting it leaks nothing and excluding it would only leave it unprotected). Editor/merge backup & swap copies of a recognised secret (`.env~`, `id_rsa.bak`, `server.pem.swp`, `#.env#`) are excluded too. The exclusion list is **name-based** (a conservative floor): a credential with an unrecognizable name — e.g. a randomly-named cloud service-account key — won't be auto-excluded, so keep it `.gitignore`'d or outside the repo. `.gitignore`'d files are excluded by default (the floor still applies even with `--include-ignored`). Snapshots survive `git clean -fdx`. Destroyed by `rm -rf .git` (same single point of failure as git itself).
+**Secrets** (`.env`, `*.pem`, `id_rsa`, `*.key`, `*firebase-adminsdk*.json`, etc.) are excluded from snapshots — **for untracked files**. The floor's job is to keep an untracked secret out of the object store; a file already **tracked by git** is exempt whether or not its working copy has been modified. A tracked edit may be the only copy of content a destructive command is about to erase, and Git's `assume-unchanged` flag makes reported modification state unreliable, so excluding it would create a silent data-loss path. This can write modified secret content into the local object store, but snapshot refs are not transferred by a default push (see [Known limitations](#known-limitations)). Editor/merge backup & swap copies of a recognised secret (`.env~`, `id_rsa.bak`, `server.pem.swp`, `#.env#`) are excluded too. The exclusion list is **name-based** (a conservative floor): a credential with an unrecognizable name — e.g. a randomly-named cloud service-account key — won't be auto-excluded, so keep it `.gitignore`'d or outside the repo. `.gitignore`'d files are excluded by default (the floor still applies even with `--include-ignored`). Snapshots survive `git clean -fdx`. Destroyed by `rm -rf .git` (same single point of failure as git itself).
 
 ---
 

@@ -124,9 +124,9 @@ class SnapshotCoreTest(unittest.TestCase):
         self.assertEqual(res.status, 0)
         self.assertEqual(res.files, 3)
 
-    def test_empty_repo_returns_one(self):
+    def test_empty_repo_returns_three(self):
         res = engine.capture(self.repo, via="manual")
-        self.assertEqual(res.status, 1)
+        self.assertEqual(res.status, 3)
 
     def test_non_repo_returns_two(self):
         import tempfile
@@ -355,6 +355,41 @@ class TrackedDeletedTest(unittest.TestCase):
         self.assertNotIn(
             ".env.local", names,
             "untracked secret must still be dropped by the floor",
+        )
+
+
+class TrackedSecretSnapshotTest(unittest.TestCase):
+    def setUp(self):
+        self.repo = helpers.make_repo()
+
+    def tearDown(self):
+        helpers.cleanup(self.repo)
+
+    def test_locally_modified_tracked_secrets_are_captured(self):
+        helpers.write_file(self.repo, ".env", "PLACEHOLDER=committed")
+        helpers.write_file(self.repo, "server.pem", "COMMITTED-PRIVATE-KEY")
+        helpers.git(self.repo, "add", ".env", "server.pem")
+        helpers.git(self.repo, "commit", "-qm", "track secrets")
+        helpers.write_file(self.repo, ".env", "TOKEN=locally-modified")
+        helpers.git(self.repo, "update-index", "--assume-unchanged", "server.pem")
+        helpers.write_file(self.repo, "server.pem", "LOCALLY-MODIFIED-PRIVATE-KEY")
+
+        res = engine.capture(self.repo, via="manual", debounce=0)
+
+        self.assertEqual(res.status, 0, res.reason)
+        ref = engine.resolve_ref(res.id)
+        names = helpers.git(
+            self.repo, "ls-tree", "-r", "--name-only", ref
+        ).stdout.decode().splitlines()
+        self.assertIn(".env", names)
+        self.assertIn("server.pem", names)
+        self.assertEqual(
+            helpers.git(self.repo, "cat-file", "blob", ref + ":.env").stdout,
+            b"TOKEN=locally-modified",
+        )
+        self.assertEqual(
+            helpers.git(self.repo, "cat-file", "blob", ref + ":server.pem").stdout,
+            b"LOCALLY-MODIFIED-PRIVATE-KEY",
         )
 
 

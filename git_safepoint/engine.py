@@ -42,6 +42,14 @@ COMMIT_IDENTITY_ENV = {
 MAX_REF_RETRIES = 64
 LABEL_MAX = 60
 
+# Snapshot status contract (also used as ``snapshot`` subcommand exit codes):
+# 0 recorded a snapshot; 3 recorded none because the tree is already protected;
+# 1 recorded none and the tree is unprotected; 2 means there is no Git work tree.
+SNAPSHOT_STATUS_RECORDED = 0
+SNAPSHOT_STATUS_UNPROTECTED = 1
+SNAPSHOT_STATUS_NOT_WORK_TREE = 2
+SNAPSHOT_STATUS_NOT_NEEDED = 3
+
 # A snapshot stamped more than this far in the future was almost certainly
 # captured during a forward clock jump; prune demotes such refs so they cannot
 # masquerade as "newest" and evict genuine snapshots.
@@ -54,7 +62,12 @@ HASH_BATCH_MAX = 500
 
 
 class SnapshotResult:
-    """Outcome of a capture attempt."""
+    """Outcome of a capture attempt.
+
+    ``status`` is ``SNAPSHOT_STATUS_RECORDED``,
+    ``SNAPSHOT_STATUS_NOT_NEEDED``, ``SNAPSHOT_STATUS_UNPROTECTED``, or
+    ``SNAPSHOT_STATUS_NOT_WORK_TREE`` according to the contract above.
+    """
 
     def __init__(
         self,
@@ -303,7 +316,7 @@ def capture(
 ) -> SnapshotResult:
     """Capture the work tree. Returns a :class:`SnapshotResult`.
 
-    status: 0 captured, 1 nothing to do / debounced / skip, 2 non-repo.
+    ``status`` follows the module-level snapshot status contract.
 
     - ``via in {"hook", "preexec"}`` implies force_rehash (trust no cache the
       instant before a destructive command) and, because force_rehash distrusts
@@ -325,7 +338,9 @@ def capture(
       when matched here (two-stage design; see :mod:`git_safepoint.secret`).
     """
     if not gitutil.is_work_tree(repo):
-        return SnapshotResult(2, reason="not a git work tree")
+        return SnapshotResult(
+            SNAPSHOT_STATUS_NOT_WORK_TREE, reason="not a git work tree"
+        )
 
     if via in ("hook", "preexec") and not conservative:
         # The destructive moment (PreToolUse hook OR zsh preexec): trust no cache
@@ -347,7 +362,10 @@ def capture(
         try:
             lock.acquire()
         except LockBusy:
-            return SnapshotResult(1, reason="another snapshot in progress")
+            return SnapshotResult(
+                SNAPSHOT_STATUS_UNPROTECTED,
+                reason="another snapshot in progress",
+            )
     else:
         # Protective path (hook / preexec / default manual): wait briefly rather
         # than skip. The previous "ride along with the in-flight snapshot"
@@ -363,7 +381,8 @@ def capture(
                 "lock)\n".format(_CAPTURE_LOCK_TIMEOUT)
             )
             return SnapshotResult(
-                1, reason="lock busy (protective snapshot skipped)"
+                SNAPSHOT_STATUS_UNPROTECTED,
+                reason="lock busy (protective snapshot skipped)",
             )
 
     try:
@@ -410,7 +429,8 @@ def _capture_locked(
         )
     if not files:
         return SnapshotResult(
-            1, reason="nothing to snapshot (no tracked+untracked files)"
+            SNAPSHOT_STATUS_NOT_NEEDED,
+            reason="nothing to snapshot (no tracked+untracked files)",
         )
 
     cache = MtimeCache.load(cache_path)
@@ -442,7 +462,7 @@ def _capture_locked(
                 and not _index_changed(snap, cache)
                 and _recorded_snapshot_present(repo, cache)):
             return SnapshotResult(
-                1,
+                SNAPSHOT_STATUS_NOT_NEEDED,
                 reason="no change (conservative mtime check)",
                 elapsed_ms=(time.time() - t0) * 1000,
             )
@@ -470,7 +490,7 @@ def _capture_locked(
                     "the unchanged tree"
                 )
             return SnapshotResult(
-                1,
+                SNAPSHOT_STATUS_NOT_NEEDED,
                 reason=reason,
                 elapsed_ms=(time.time() - t0) * 1000,
             )
@@ -677,7 +697,9 @@ def _capture_locked(
 
         if count == 0:
             return SnapshotResult(
-                1, skipped=skipped, reason="nothing captured (all skipped)"
+                SNAPSHOT_STATUS_UNPROTECTED,
+                skipped=skipped,
+                reason="nothing captured (all skipped)",
             )
 
         gitutil.run_git(
@@ -727,7 +749,7 @@ def _capture_locked(
                         "the unchanged tree"
                     )
                 return SnapshotResult(
-                    1,
+                    SNAPSHOT_STATUS_NOT_NEEDED,
                     reused=reused,
                     skipped=skipped,
                     reason=reason,
@@ -763,7 +785,7 @@ def _capture_locked(
             )
 
         return SnapshotResult(
-            0,
+            SNAPSHOT_STATUS_RECORDED,
             snap_id=snap_id,
             ref=ref,
             commit=commit,

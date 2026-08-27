@@ -16,7 +16,8 @@ import argparse
 import subprocess
 import sys
 
-from git_safepoint import engine
+from git_safepoint import engine, gitutil
+from git_safepoint.lock import RepoLock
 
 
 def run_cli(argv):
@@ -66,9 +67,22 @@ class CliTest(unittest.TestCase):
         finally:
             shutil.rmtree(d, ignore_errors=True)
 
-    def test_empty_repo_snapshot_exit_one(self):
+    def test_empty_repo_snapshot_exit_three(self):
         rc, _, _ = run_cli(["--repo", self.repo, "snapshot"])
-        self.assertEqual(rc, 1)
+        self.assertEqual(rc, 3)
+
+    def test_unchanged_repo_snapshot_exit_three(self):
+        helpers.write_file(self.repo, "f.txt", "x")
+        helpers.git(self.repo, "add", "f.txt")
+        helpers.git(self.repo, "commit", "-qm", "initial")
+        run_cli(["--repo", self.repo, "snapshot"])
+
+        rc, _, err = run_cli([
+            "--repo", self.repo, "snapshot", "--via", "preexec",
+        ])
+
+        self.assertEqual(rc, 3)
+        self.assertIn("identical tree", err)
 
     def test_list_empty_exit_zero(self):
         rc, out, _ = run_cli(["--repo", self.repo, "list"])
@@ -80,6 +94,39 @@ class CliTest(unittest.TestCase):
         rc, out, _ = run_cli(["--repo", self.repo, "snapshot", "--quiet"])
         self.assertEqual(rc, 0)
         self.assertEqual(out.strip(), "")
+
+    def test_quiet_suppresses_only_benign_snapshot_reason(self):
+        helpers.write_file(self.repo, "f.txt", "x")
+        run_cli(["--repo", self.repo, "snapshot", "--force"])
+
+        rc, out, err = run_cli([
+            "--repo", self.repo, "snapshot", "--via", "preexec", "--quiet",
+        ])
+        self.assertEqual(rc, 3)
+        self.assertEqual(out, "")
+        self.assertEqual(err, "")
+
+        lock_path = os.path.join(gitutil.shared_snap_dir(self.repo), "lock")
+        holder = RepoLock(lock_path)
+        holder.acquire()
+        try:
+            rc, _, err = run_cli([
+                "--repo", self.repo, "snapshot", "--no-wait", "--quiet",
+            ])
+        finally:
+            holder.release()
+        self.assertEqual(rc, 1)
+        self.assertIn("another snapshot in progress", err)
+
+        non_repo = tempfile.mkdtemp(prefix="not-a-repo-")
+        try:
+            rc, _, err = run_cli([
+                "--repo", non_repo, "snapshot", "--quiet",
+            ])
+        finally:
+            shutil.rmtree(non_repo, ignore_errors=True)
+        self.assertEqual(rc, 2)
+        self.assertIn("not a git work tree", err)
 
     def test_prune_cli(self):
         for i in range(4):
@@ -307,7 +354,7 @@ class LabelDedupHintTest(unittest.TestCase):
         # Same tree + a label -> dedup drops the label; the reason must say how to
         # force-record it (#24).
         res = engine.capture(self.repo, via="manual", label="bookmark", debounce=0)
-        self.assertEqual(res.status, 1)
+        self.assertEqual(res.status, 3)
         self.assertIn("--force", res.reason)
 
 

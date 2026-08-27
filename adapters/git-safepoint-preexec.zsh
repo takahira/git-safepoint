@@ -489,11 +489,17 @@ git_safepoint_preexec() {
   # Only inside a git work tree.
   git rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 0
   if _git_safepoint_is_destructive "$cmd"; then
-    local repo wt wtop
+    local repo wt wtop snap_status
     repo="$(git rev-parse --show-toplevel 2>/dev/null)"
     [[ -n "$repo" ]] || return 0
+    # Status 1 or 2 means the tree was not protected, so report every occurrence;
+    # status 3 means an existing snapshot already covers it and is silent like 0.
     python3 "$GIT_SAFEPOINT_PY" --repo "$repo" snapshot \
-      --via preexec --label "pre-shell: ${cmd}" --quiet 2>/dev/null
+      --via preexec --label "pre-shell: ${cmd}" --quiet
+    snap_status=$?
+    if (( snap_status == 1 || snap_status == 2 )); then
+      print -u2 -r -- "warning: git-safepoint failed for '$repo'; NO protective snapshot was taken"
+    fi
     # `git worktree remove <path>` destroys files in ANOTHER work tree, which the
     # snapshot above does not cover. Protect that tree IN ADDITION -- never
     # instead: a compound line can lose data on both sides
@@ -503,7 +509,11 @@ git_safepoint_preexec() {
       wtop="$(git -C "$wt" rev-parse --show-toplevel 2>/dev/null)"
       if [[ -n "$wtop" && "$wtop" != "$repo" ]]; then
         python3 "$GIT_SAFEPOINT_PY" --repo "$wtop" snapshot \
-          --via preexec --label "pre-shell: ${cmd}" --quiet 2>/dev/null
+          --via preexec --label "pre-shell: ${cmd}" --quiet
+        snap_status=$?
+        if (( snap_status == 1 || snap_status == 2 )); then
+          print -u2 -r -- "warning: git-safepoint failed for worktree '$wtop'; NO protective snapshot was taken"
+        fi
       fi
     fi
   fi

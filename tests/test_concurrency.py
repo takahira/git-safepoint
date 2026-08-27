@@ -54,6 +54,7 @@ except (ValueError, RuntimeError):  # pragma: no cover - exotic platforms
     _HAVE_SPAWN = False
 
 import errno
+import io
 import shutil
 import tempfile
 import threading
@@ -269,13 +270,18 @@ class CaptureLockTimeoutSkipTest(unittest.TestCase):
             holder.acquire()
             saved = engine._CAPTURE_LOCK_TIMEOUT
             engine._CAPTURE_LOCK_TIMEOUT = 0.1  # keep the test fast
+            stderr = io.StringIO()
             try:
-                res = engine.capture(repo, via="hook", conservative=True, debounce=0)
+                with mock.patch.object(engine.sys, "stderr", stderr):
+                    res = engine.capture(
+                        repo, via="hook", conservative=True, debounce=0
+                    )
             finally:
                 engine._CAPTURE_LOCK_TIMEOUT = saved
                 holder.release()
             self.assertEqual(res.status, 1)
             self.assertIn("lock busy", res.reason)
+            self.assertIn("protective snapshot NOT taken", stderr.getvalue())
         finally:
             helpers.cleanup(repo)
 

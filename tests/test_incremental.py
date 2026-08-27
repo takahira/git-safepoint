@@ -72,9 +72,9 @@ class IncrementalTest(unittest.TestCase):
         self._make_files(3)
         r1 = engine.capture(self.repo, via="manual", debounce=5)
         self.assertEqual(r1.status, 0)
-        # Immediate re-capture, no change -> debounced skip (status 1).
+        # Immediate re-capture, no change -> protected no-op (status 3).
         r2 = engine.capture(self.repo, via="manual", debounce=5)
-        self.assertEqual(r2.status, 1)
+        self.assertEqual(r2.status, 3)
         self.assertIn("debounce", r2.reason)
 
     def test_debounce_captures_on_change(self):
@@ -160,7 +160,7 @@ class ConservativeSkipDeletionAwareTest(unittest.TestCase):
         engine.capture(self.repo, via="manual", force=True, debounce=0)
         os.unlink(os.path.join(self.repo, ".env"))  # delete the tracked secret
         res = engine.capture(self.repo, via="hook", conservative=True, debounce=0)
-        self.assertEqual(res.status, 1, "deleted secret should not force a capture")
+        self.assertEqual(res.status, 3, "deleted secret should not force a capture")
 
 
 class MalformedCacheTest(unittest.TestCase):
@@ -205,7 +205,7 @@ class SignatureSkipsDirsTest(unittest.TestCase):
             # Nothing changed: the 2nd capture must hit the fast mtime skip, NOT
             # fall through to a re-hash + tree dedup (distinguished by the reason).
             res = engine.capture(repo, via="hook", conservative=True, debounce=0)
-            self.assertEqual(res.status, 1)
+            self.assertEqual(res.status, 3)
             self.assertIn("conservative mtime check", res.reason)
         finally:
             helpers.cleanup(repo)

@@ -144,13 +144,13 @@ class HookE2ETest(unittest.TestCase):
 
     def test_debounce_skips_unchanged_manual_capture(self):
         # The DEBOUNCE gate proper (not force-rehash): a manual capture with
-        # debounce>0 over an unchanged work tree skips with status 1 before any
+        # debounce>0 over an unchanged work tree skips with status 3 before any
         # tree is built (this path was previously uncovered).
         helpers.write_file(self.repo, "f.txt", "x")
         r1 = engine.capture(self.repo, via="manual", debounce=5.0)
         self.assertEqual(r1.status, 0)
         r2 = engine.capture(self.repo, via="manual", debounce=5.0)
-        self.assertEqual(r2.status, 1)
+        self.assertEqual(r2.status, 3)
         self.assertIn("debounce", r2.reason)
         self.assertEqual(len(engine.list_refs(self.repo)), 1)
 
@@ -338,6 +338,23 @@ class ZshPreexecTest(unittest.TestCase):
     """N13: smoke-test the zsh preexec destructive detector (runs on macOS / any
     runner with zsh; skipped otherwise)."""
 
+    def _run_preexec(self, repo, cmd, safepoint_py, extra_env=None):
+        adapter = os.path.join(
+            helpers.PKG_ROOT, "adapters", "git-safepoint-preexec.zsh"
+        )
+        env = dict(os.environ)
+        env["GIT_SAFEPOINT_PY"] = safepoint_py
+        if extra_env:
+            env.update(extra_env)
+        return subprocess.run(
+            [
+                "zsh", "-c",
+                'source "$1"; cd "$2"; git_safepoint_preexec "$3"',
+                "zsh", adapter, repo, cmd,
+            ],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env,
+        )
+
     def _destructive(self, cmd):
         adapter = os.path.join(
             helpers.PKG_ROOT, "adapters", "git-safepoint-preexec.zsh"
@@ -348,6 +365,55 @@ class ZshPreexecTest(unittest.TestCase):
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
         return proc.returncode == 0
+
+    def test_snapshot_failure_warns_but_preexec_returns_zero(self):
+        repo = helpers.make_repo()
+        self.addCleanup(helpers.cleanup, repo)
+        missing = os.path.join(repo, "does-not-exist.py")
+
+        proc = self._run_preexec(repo, "rm -rf notes", missing)
+
+        self.assertEqual(proc.returncode, 0)
+        self.assertIn(b"NO protective snapshot was taken", proc.stderr)
+
+    def test_protected_noop_is_silent_and_preexec_returns_zero(self):
+        repo = helpers.make_repo()
+        self.addCleanup(helpers.cleanup, repo)
+        stub = helpers.write_file(
+            repo, "fake_safepoint.py", "raise SystemExit(3)\n"
+        )
+
+        proc = self._run_preexec(repo, "rm -rf notes", stub)
+
+        self.assertEqual(proc.returncode, 0)
+        self.assertEqual(proc.stderr, b"")
+
+    def test_worktree_snapshot_failure_is_reported_separately(self):
+        repo = helpers.make_repo()
+        self.addCleanup(helpers.cleanup, repo)
+        helpers.write_file(repo, "tracked.txt", "tracked")
+        helpers.git(repo, "add", "tracked.txt")
+        helpers.git(repo, "commit", "-qm", "initial")
+        worktree = repo + "-linked"
+        self.addCleanup(helpers.cleanup, worktree)
+        helpers.git(repo, "worktree", "add", "-q", "-b", "linked", worktree)
+        stub = helpers.write_file(
+            repo,
+            "fake_safepoint.py",
+            "import os\n"
+            "import sys\n"
+            "repo = sys.argv[sys.argv.index('--repo') + 1]\n"
+            "raise SystemExit(1 if os.path.realpath(repo) == "
+            "os.path.realpath(os.environ['FAIL_REPO']) else 0)\n",
+        )
+        proc = self._run_preexec(
+            repo, "git worktree remove " + worktree, stub,
+            {"FAIL_REPO": worktree},
+        )
+
+        self.assertEqual(proc.returncode, 0)
+        self.assertEqual(proc.stderr.count(b"NO protective snapshot was taken"), 1)
+        self.assertIn(os.fsencode(worktree), proc.stderr)
 
     def test_destructive_cases_fire(self):
         for c in ("rm -rf x", "git reset --hard", "gzip f", "foo > out",

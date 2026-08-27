@@ -378,33 +378,11 @@ def list_deleted_cached(repo: str) -> List[str]:
 def list_tracked(repo: str) -> List[str]:
     """Paths tracked in the index (stage 0), repo-relative.
 
-    Used to exempt already-committed/staged files from the secret floor:
-    their blobs are already in the object store, so snapshotting
-    them leaks nothing, while excluding them would leave a tracked
-    ``id_rsa`` / ``server.pem`` / ``credentials.json`` unprotected. ``-z`` keeps
-    odd names intact; surrogateescape so a non-UTF-8 tracked name never raises.
+    Used to exempt tracked files from the secret floor regardless of work-tree
+    modification state. ``-z`` keeps odd names intact; surrogateescape so a
+    non-UTF-8 tracked name never raises.
     """
     out = run_git(repo, ["ls-files", "-z"]).stdout
-    return _decode_z(out)
-
-
-def list_modified_tracked(repo: str) -> List[str]:
-    """Tracked paths whose WORK-TREE content differs from the index.
-
-    This is exactly the delta a snapshot would newly write into the object
-    database. Two deliberate choices:
-
-    - ``diff-files`` compares work tree against **index**, not HEAD: content
-      already staged was put in the object store by the user's own ``git add``,
-      so it is not something we would be introducing.
-    - ``--diff-filter=d`` EXCLUDES deletions. A tracked file removed from the work
-      tree is "modified" to git, but capture reinjects its staged blob rather than
-      hashing anything new, so there is no new content to leak and treating it as
-      modified would drop a deleted tracked secret from the snapshot for nothing.
-    """
-    out = run_git(
-        repo, ["diff-files", "-z", "--name-only", "--diff-filter=d"]
-    ).stdout
     return _decode_z(out)
 
 
@@ -446,17 +424,18 @@ def list_worktree_files(
 
     Stage 3 (always, even with opt-in): every candidate path is run through the
     secret matcher; matches are dropped and returned separately so the caller can
-    report them. A tracked secret is EXEMPT only while it is UNMODIFIED: its blob
-    is already in the object store, so snapshotting it stores nothing new, and
-    excluding it would leave a tracked ``id_rsa`` / ``server.pem`` /
-    ``credentials.json`` unprotected for zero secrecy benefit.
+    report them. A tracked secret is ALWAYS EXEMPT, whether or not its work-tree
+    content differs from the index. A locally edited tracked ``.env`` may contain
+    the only copy of a credential; dropping it would make a protective snapshot
+    silently lose the very content a destructive command is about to erase.
 
-    That exemption does NOT extend to a tracked secret edited in the work tree.
-    A ``.env`` committed with placeholders but edited locally to a live token has
-    contents that exist nowhere in the object store yet, and capture would write
-    them there with ``hash-object -w`` -- permanently, and reachable by
-    ``git push --mirror`` / ``git bundle --all``. Those are dropped like an
-    untracked secret.
+    This can write locally modified secret content into the object store. That is
+    the deliberate safety tradeoff once the path is already tracked: ordinary
+    pushes do not transfer ``refs/snapshots/*``, while an unsnapshotted edit may
+    exist nowhere else. A modified/unmodified distinction is not a dependable
+    disclosure boundary anyway: ``git update-index --assume-unchanged`` hides
+    work-tree edits from ``git diff-files``. The exemption therefore depends only
+    on whether the path is tracked, never on reported modification state.
 
     ``-z`` keeps odd names (spaces / newlines / non-ASCII) intact. We dedupe
     because cached and others can overlap in rare edge cases.
@@ -484,19 +463,17 @@ def list_worktree_files(
                 seen_set.add(path)
                 seen.append(path)
 
-    # Stage 3: strip secret-shaped paths. A tracked one is exempt only while it
-    # matches the index -- see the docstring. Two extra ``ls-files``/``diff-files``
-    # forks buy the tracked and locally-modified sets; both are skipped entirely
-    # unless something actually looks like a secret, so the common case pays
-    # nothing.
+    # Stage 3: strip secret-shaped paths. A tracked one is always exempt -- see
+    # the docstring. One extra ``ls-files`` fork buys the tracked set; it is
+    # skipped entirely unless something actually looks like a secret, so the
+    # common case pays nothing.
     kept: List[str] = []
     dropped: List[str] = []
     candidates = [rel for rel in seen if secret.is_secret(rel, secret_patterns)]
     if not candidates:
         return list(seen), dropped
     tracked = set(list_tracked(repo))
-    modified = set(list_modified_tracked(repo))
-    exempt = {rel for rel in candidates if rel in tracked and rel not in modified}
+    exempt = {rel for rel in candidates if rel in tracked}
     for rel in seen:
         if rel not in candidates or rel in exempt:
             kept.append(rel)

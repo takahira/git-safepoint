@@ -40,7 +40,7 @@ def _include_ignored_from_env() -> Optional[List[str]]:
 
 
 def _print_snapshot_result(res: engine.SnapshotResult, quiet: bool) -> None:
-    if res.status == 0:
+    if res.status == engine.SNAPSHOT_STATUS_RECORDED:
         if quiet:
             return
         print("snapshot {0}".format(res.id))
@@ -51,7 +51,7 @@ def _print_snapshot_result(res: engine.SnapshotResult, quiet: bool) -> None:
         if res.skipped:
             print("  skipped: {0}".format(res.skipped))
         print("  elapsed: {0:.1f} ms".format(res.elapsed_ms))
-    else:
+    elif not quiet or res.status != engine.SNAPSHOT_STATUS_NOT_NEEDED:
         if res.reason:
             print(res.reason, file=sys.stderr)
 
@@ -565,7 +565,7 @@ def cmd_hook(repo: str, args: argparse.Namespace) -> int:
                     file=sys.stderr,
                 )
                 continue
-            if res.status == 0:
+            if res.status == engine.SNAPSHOT_STATUS_RECORDED:
                 print(
                     "hook: snapshot {0} ({1} files)".format(res.id, res.files),
                     file=sys.stderr,

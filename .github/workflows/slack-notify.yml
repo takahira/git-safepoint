@@ -13,9 +13,10 @@ permissions:
 
 jobs:
   notify:
-    # Only the canonical repo: this routes to the maintainer's personal #github-ci
-    # webhook, so forks never run it even if they happen to set the secret.
-    if: ${{ github.repository == 'takahira/git-safepoint' && github.event.workflow_run.conclusion == 'failure' }}
+    # A workflow running in a fork has a different github.repository; a fork PR's
+    # CI runs in the canonical repo but has a different head_repository. Require
+    # both to protect the maintainer's personal #github-ci webhook.
+    if: ${{ github.repository == 'takahira/git-safepoint' && github.event.workflow_run.head_repository.full_name == github.repository && github.event.workflow_run.conclusion == 'failure' }}
     runs-on: ubuntu-latest
     steps:
       - name: Notify Slack

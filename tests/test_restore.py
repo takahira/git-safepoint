@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Restore UX: diff (name-status / per-file), restore --dir / --all, list."""
 import os
+import stat
 import unittest
 
 from tests import helpers
@@ -968,3 +969,47 @@ class RestoreInterruptTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RestoreDeletedFileRespectsUmaskTest(unittest.TestCase):
+    """Restoring a MISSING file had no prior mode to narrow against, so it
+    chmod'ed to a bare 0644 and ignored umask -- turning a 0600 `.env` into a
+    world-readable file. git itself would have created it 0666 & ~umask, so the
+    unconditional chmod was worse than the default it replaced."""
+
+    def setUp(self):
+        self.repo = helpers.make_repo()
+        self.addCleanup(helpers.cleanup, self.repo)
+        self._old_umask = os.umask(0o077)
+        self.addCleanup(os.umask, self._old_umask)
+
+    def _snapshot_id(self):
+        res = engine.capture(self.repo, via="manual", force=True, debounce=0)
+        self.assertEqual(res.status, engine.SNAPSHOT_STATUS_RECORDED)
+        return res.id
+
+    def test_deleted_regular_file_is_not_widened_past_umask(self):
+        path = helpers.write_file(self.repo, "private-notes.txt", "TOKEN=live")
+        os.chmod(path, 0o600)
+        snap = self._snapshot_id()
+        os.unlink(path)
+
+        engine.restore_file(self.repo, snap, "private-notes.txt")
+
+        mode = stat.S_IMODE(os.lstat(path).st_mode)
+        self.assertEqual(
+            mode & 0o077, 0,
+            "umask 077 must leave no group/other bits on a restored file",
+        )
+        self.assertEqual(helpers.read_file(self.repo, "private-notes.txt"), b"TOKEN=live")
+
+    def test_deleted_executable_keeps_owner_execute(self):
+        helpers.write_file(self.repo, "run.sh", "#!/bin/sh\n", executable=True)
+        snap = self._snapshot_id()
+        os.unlink(os.path.join(self.repo, "run.sh"))
+
+        engine.restore_file(self.repo, snap, "run.sh")
+
+        mode = stat.S_IMODE(os.lstat(os.path.join(self.repo, "run.sh")).st_mode)
+        self.assertTrue(mode & 0o100, "owner execute bit must survive the restore")
+        self.assertEqual(mode & 0o077, 0, "umask 077 must still be respected")

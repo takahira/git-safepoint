@@ -725,3 +725,44 @@ class HookFailOpenTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HookSubdirectoryCwdTest(unittest.TestCase):
+    """The read-only Bash fast path rooted the snapshot at ``cwd`` itself. Because
+    ``is_work_tree`` answers True for a SUBDIRECTORY, a hook fired from one
+    captured only that subtree while reporting success, leaving everything above
+    it unprotected."""
+
+    def setUp(self):
+        self.repo = helpers.make_repo()
+        self.addCleanup(helpers.cleanup, self.repo)
+        helpers.write_file(self.repo, "draft.txt", "root content")
+        helpers.write_file(self.repo, "src/a.txt", "src content")
+        helpers.git(self.repo, "add", "-A")
+        helpers.git(self.repo, "commit", "-qm", "initial")
+
+    def _snapshot_paths(self):
+        ref = helpers.git(
+            self.repo, "for-each-ref", "--sort=-creatordate", "--count=1",
+            "--format=%(refname)", "refs/snapshots",
+        ).stdout.decode().strip()
+        self.assertTrue(ref, "no snapshot ref was created")
+        out = helpers.git(self.repo, "ls-tree", "-r", "--name-only", ref).stdout
+        return set(out.decode().split())
+
+    def test_read_only_bash_from_subdir_covers_the_whole_work_tree(self):
+        run_hook(
+            {"tool_name": "Bash", "tool_input": {"command": "cat a.txt"},
+             "cwd": os.path.join(self.repo, "src")},
+            self.repo,
+        )
+        self.assertEqual(self._snapshot_paths(), {"draft.txt", "src/a.txt"})
+
+    def test_write_from_subdir_covers_the_whole_work_tree(self):
+        run_hook(
+            {"tool_name": "Write",
+             "tool_input": {"file_path": os.path.join(self.repo, "src", "a.txt")},
+             "cwd": os.path.join(self.repo, "src")},
+            self.repo,
+        )
+        self.assertEqual(self._snapshot_paths(), {"draft.txt", "src/a.txt"})

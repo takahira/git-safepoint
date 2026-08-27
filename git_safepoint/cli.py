@@ -508,14 +508,21 @@ def cmd_hook(repo: str, args: argparse.Namespace) -> int:
             # read-only Bash stays cheap.
             destructive = looks_destructive(command)
             conservative = not destructive
-            primary = os.path.abspath(cwd)
+            # Walk up to the WORK-TREE ROOT, not just abspath(cwd). ``cwd`` is
+            # frequently a subdirectory, and ``is_work_tree`` answers True for one,
+            # so passing it through unnormalized rooted the snapshot at the
+            # subdirectory: ``cat src/a.txt`` from ``/repo/src`` captured only
+            # ``src/``'s files and reported success, leaving ``/repo/draft.txt``
+            # unprotected. One rev-parse walk here is the same cost the other two
+            # branches already pay.
+            primary = _git_toplevel(cwd)
             if destructive:
                 # Destructive: union cwd's repo with every repo the command's
                 # path-shaped tokens (absolute, relative, or bare-name dirs)
                 # resolve into, so ``rm -rf /other/repo/...``
                 # from inside repoA snapshots repoB too.
                 repos = _repos_from_command(command, cwd)
-            elif gitutil.is_work_tree(primary):
+            elif primary:
                 # Read-only: fast path -- snapshot only cwd's repo. Avoids the
                 # per-token ``git rev-parse`` walks on every Bash call and avoids
                 # littering UNRELATED repos that a read-only command merely reads

@@ -1452,6 +1452,19 @@ def _backup_existing(repo: str, rel: str, no_backup: bool) -> Optional[str]:
     return bak_path
 
 
+def _current_umask() -> int:
+    """Read the process umask without leaving it changed.
+
+    ``os.umask`` is the only way to read it, and it is a set-and-return call, so
+    the value has to be written straight back. Restores are not concurrent within
+    a process (the CLI is single-threaded per invocation), so the momentary window
+    is not observable.
+    """
+    cur = os.umask(0o077)
+    os.umask(cur)
+    return cur
+
+
 def _write_blob_to_path(repo: str, spec: str, rel: str, mode: str) -> None:
     """Write the blob identified by ``spec`` to ``rel`` in the work tree.
 
@@ -1516,6 +1529,15 @@ def _write_blob_to_path(repo: str, spec: str, rel: str, mode: str) -> None:
             # Keep every owner bit (so an executable stays runnable) but grant no
             # group/other bit the file did not already have.
             want &= prev_mode | 0o700
+        else:
+            # The destination does NOT exist -- restoring a deleted file, which is
+            # this tool's central use case. With no prior mode to narrow against,
+            # chmod'ing to a bare 0644/0755 IGNORES umask and publishes a 0600
+            # `.env` to group and other. git itself creates a restored file at
+            # 0666 & ~umask, so the unconditional chmod was strictly WORSE than
+            # the thing it exists to protect. Apply umask ourselves; the file was
+            # created 0600 above, so a restrictive umask simply keeps it there.
+            want &= ((~_current_umask() & 0o777) | 0o600)
         with contextlib.suppress(OSError):
             os.chmod(tmp, want)
         os.replace(tmp, abs_path)

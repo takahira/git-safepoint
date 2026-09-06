@@ -17,6 +17,15 @@ class DestructiveTrueCases(unittest.TestCase):
     def test_rm(self):
         self.assertTrue(looks_destructive("rm -rf notes"))
 
+    def test_leading_redirect_before_rm(self):
+        for command in (
+            "rm -rf notes",
+            "2>/dev/null rm -rf notes",
+            "< input rm -rf notes",
+            ">out.txt rm -rf notes",
+        ):
+            self.assertTrue(looks_destructive(command), command)
+
     def test_rmdir(self):
         self.assertTrue(looks_destructive("rmdir build"))
 
@@ -563,6 +572,8 @@ class ZshAdapterBehaviourParityTest(unittest.TestCase):
         # redirects (judged separately, and they override a no-write mode)
         "echo x > out.txt", "echo x >> out.txt", "echo x > /dev/null",
         "echo x 2>&1", "rsync -avn s d > out.txt", "tar -xOf a.tar f > out.txt",
+        "2>/dev/null rm -rf notes", "< input rm -rf notes",
+        ">out.txt rm -rf notes",
         # misc
         "cat a | tee b", "cat a | tee -a b", "tee /dev/null", "ls | grep x",
         "echo hello", "truncate -s 0 f", "dd if=a of=b", "shred f", "gzip f",

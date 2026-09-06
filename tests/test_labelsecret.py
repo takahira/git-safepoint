@@ -53,6 +53,16 @@ class TestRedactLabel(unittest.TestCase):
             self.assertNotIn(leaked, out, text)
             self.assertIn(MASK, out, text)
 
+    def test_sshpass_masks_quoted_password_with_spaces(self):
+        self.assertEqual(
+            redact_label("sshpass -p 'correct horse battery staple' ssh host"),
+            "sshpass -p<redacted> ssh host",
+        )
+        self.assertEqual(
+            redact_label("mysql -p 'space pass here' -u root"),
+            "mysql -p<redacted> -u root",
+        )
+
     def test_ordinary_commands_are_untouched(self):
         for text in (
             "pre-bash: git status",

@@ -354,20 +354,29 @@ def _segments_from_tokens(tokens: List[str]) -> List[List[str]]:
     """Split a token list into command segments on control operators.
 
     Redirect operator tokens (and their nature) are handled separately by
-    :func:`_has_truncating_redirect`; here we drop them so a segment's head verb
-    is the real command, not a redirect glyph.
+    :func:`_has_truncating_redirect`; here we drop them and their targets so a
+    segment's head verb is the real command, not a redirect target.
     """
     segments: List[List[str]] = []
     current: List[str] = []
-    for tok in tokens:
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
         if tok in _SEPARATOR_TOKENS:
             if current:
                 segments.append(current)
                 current = []
         elif _is_redirect_op(tok):
-            continue
+            # 先頭リダイレクトは対象も除き、実際のコマンドを先頭語にする。
+            i += 1
         else:
             current.append(tok)
+            # shlex は先頭の `2>` を `2`, `>` に分けるため fd 番号も除く。
+            if (len(current) == 1 and tok.isdigit()
+                    and i + 1 < len(tokens)
+                    and _is_redirect_op(tokens[i + 1])):
+                current.pop()
+        i += 1
     if current:
         segments.append(current)
     return segments

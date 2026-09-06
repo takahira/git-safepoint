@@ -268,6 +268,7 @@ _gsp_seg_has_no_write() {
 }
 
 _git_safepoint_is_destructive() {
+  setopt localoptions extendedglob
   local cmd="$1"
   if _git_safepoint_has_truncating_redirect "$cmd"; then
     return 0
@@ -284,11 +285,15 @@ _git_safepoint_is_destructive() {
   # `_gspw`, not `a`: the later `local seg verb sub a` would re-declare an
   # already-set `a`, and zsh PRINTS a re-declared local -- dumping `a=notes` to
   # stdout on every single command through preexec.
-  local _gspw
+  local _gspw _redir_core _skip_redirect_target=0
   _allw=(${(z)cmd})
   segs=()
   _segw=()
   for _gspw in "${_allw[@]}"; do
+    if (( _skip_redirect_target )); then
+      _skip_redirect_target=0
+      continue
+    fi
     case "$_gspw" in
       ';'|'&&'|'||'|'|'|'&'|';;'|'|&'|$'\n')
         (( $#_segw )) && segs+=("${(j: :)${(q)_segw[@]}}")
@@ -298,7 +303,16 @@ _git_safepoint_is_destructive() {
       # word meaning `rm`. Unquote at split time and re-quote with `${(q)}` when
       # rejoining, so the segment string transports words containing spaces
       # intact AND a single `${(Q)}` downstream lands on the real word.
-      *) _segw+=("${(Q)_gspw}") ;;
+      *)
+        _redir_core="${_gspw##[0-9]#}"
+        if [[ "$_gspw" == [0-9]#[\<\>\&\|]## &&
+              ( "$_redir_core" == *'>'* || "$_redir_core" == *'<'* ) ]]; then
+          # 先頭リダイレクトは対象も除き、実際のコマンドを先頭語にする。
+          _skip_redirect_target=1
+        else
+          _segw+=("${(Q)_gspw}")
+        fi
+        ;;
     esac
   done
   (( $#_segw )) && segs+=("${(j: :)${(q)_segw[@]}}")

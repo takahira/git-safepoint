@@ -55,7 +55,8 @@ _RULES: List[Tuple[re.Pattern, int]] = [
     # ``-p -e ...`` (prompt form) does not mask the next flag. The quoted
     # alternatives matter: ``-p'Hunter2'`` passed through UNmasked before they
     # were added, because the bare form rejects a leading quote.
-    (re.compile(r"(?i)(\bsshpass\b[^\n]{0,120}?\s-p)\s*([^\s;|&]+)"), 1),
+    (re.compile(r"(?i)(\bsshpass\b[^\n]{0,120}?\s-p)\s*"
+                r"('[^']*'|\"[^\"]*\"|[A-Za-z0-9][^\s;|&]*)"), 1),
     (re.compile(r"(?i)(\b(?:mysql|mysqldump|mariadb|mongosh)\b[^\n]{0,300}?\s-p)\s*"
                 r"('[^']*'|\"[^\"]*\"|[A-Za-z0-9][^\s;|&]*)"), 1),
     (re.compile(r"(?i)(\bredis-cli\b[^\n]{0,300}?\s-a)\s*"

@@ -1,9 +1,9 @@
 # git-safepoint zsh preexec adapter (template)
 #
-# Source this from ~/.zshrc to snapshot the current git repo right before a
-# destructive command runs in your shell. It mirrors the PreToolUse hook: a
-# thin trigger over the single capture engine. It NEVER blocks your command --
-# the snapshot runs, then the command proceeds (fail-open).
+# Source this from ~/.zshrc to snapshot every git repo a destructive command is
+# about to touch, including the current repo when present. It mirrors the
+# PreToolUse hook: a thin trigger over the single capture engine. It NEVER blocks
+# your command -- the snapshots run, then the command proceeds (fail-open).
 #
 #   source /ABS/PATH/adapters/git-safepoint-preexec.zsh
 #
@@ -440,96 +440,37 @@ _git_safepoint_is_destructive() {
   return 1
 }
 
-# Print the work tree that `git worktree remove <path>` is about to delete.
-#
-# This is the one destructive command whose data loss happens OUTSIDE the
-# current work tree, so snapshotting `--show-toplevel` would faithfully capture
-# a tree that is not in danger while the doomed one -- including its dirty and
-# untracked files -- goes unprotected. Returns non-zero when the command is not
-# a worktree removal, leaving the caller on the current repo.
-_gsp_worktree_remove_target() {
-  local -a toks
-  toks=(${(z)1})
-  local n=$#toks i j k t sub target b saw_git
-  for (( i = 1; i <= n; i++ )); do
-    [[ "$(_gsp_unquote "${toks[$i]}")" == worktree ]] || continue
-    # `worktree` must be THIS segment's git subcommand, not just any word on the
-    # line: `echo worktree remove /tmp/wt && rm notes` would otherwise redirect
-    # the snapshot to /tmp/wt and leave the `rm` unprotected. Scan back to the
-    # nearest command separator and require a `git` verb in that window.
-    saw_git=0
-    for (( b = i - 1; b >= 1; b-- )); do
-      t="$(_gsp_unquote "${toks[$b]}")"
-      case "$t" in
-        '&&'|'||'|';'|';;'|'|'|'|&'|'&'|$'\n') break ;;
-      esac
-      [[ "${t:t}" == git ]] && saw_git=1 && break
-    done
-    (( saw_git )) || continue
-    # First non-flag word after `worktree` is the subcommand.
-    sub=""
-    for (( j = i + 1; j <= n; j++ )); do
-      t="$(_gsp_unquote "${toks[$j]}")"
-      [[ "$t" == -* ]] && continue
-      sub="$t"
-      break
-    done
-    [[ "$sub" == remove ]] || continue
-    # `remove` takes exactly ONE <worktree> operand, so take the FIRST non-flag
-    # word and stop at the first command separator. Taking the last one instead
-    # walks straight past `&&`/`;`/`|` into the next command and picks up its
-    # arguments (`git worktree remove ../wt && echo done` yielded `done`, which
-    # resolves to no repo and silently fell back to snapshotting the wrong tree).
-    target=""
-    for (( k = j + 1; k <= n; k++ )); do
-      t="$(_gsp_unquote "${toks[$k]}")"
-      case "$t" in
-        '&&'|'||'|';'|';;'|'|'|'|&'|'&'|$'\n') break ;;
-      esac
-      [[ "$t" == -* ]] && continue
-      target="$t"
-      break
-    done
-    if [[ -n "$target" ]]; then
-      print -r -- "$target"
-      return 0
-    fi
-  done
-  return 1
-}
-
 git_safepoint_preexec() {
   local cmd="$1"
-  # Only inside a git work tree.
-  git rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 0
   if _git_safepoint_is_destructive "$cmd"; then
-    local repo wt wtop snap_status
-    repo="$(git rev-parse --show-toplevel 2>/dev/null)"
-    [[ -n "$repo" ]] || return 0
-    # Status 1 or 2 means the tree was not protected, so report every occurrence;
-    # status 3 means an existing snapshot already covers it and is silent like 0.
-    python3 "$GIT_SAFEPOINT_PY" --repo "$repo" snapshot \
-      --via preexec --label "pre-shell: ${cmd}" --quiet
-    snap_status=$?
-    if (( snap_status == 1 || snap_status == 2 )); then
-      print -u2 -r -- "warning: git-safepoint failed for '$repo'; NO protective snapshot was taken"
+    local repo repo_bytes resolve_status snap_status
+    local -a repos
+    # Resolve path-shaped operands with the same implementation as the
+    # PreToolUse hook. This deliberately works from a non-repo cwd and includes
+    # both external targets and cwd's repo when present. NUL-delimited output
+    # preserves whitespace (including newlines) in work-tree paths.
+    repo_bytes="$(
+      python3 "$GIT_SAFEPOINT_PY" --repo "$PWD" \
+        hook --_resolve-command-repos "$cmd"
+    )"
+    resolve_status=$?
+    if (( resolve_status != 0 )); then
+      print -u2 -r -- "warning: git-safepoint could not resolve target repos; NO protective snapshot was taken"
+      return 0
     fi
-    # `git worktree remove <path>` destroys files in ANOTHER work tree, which the
-    # snapshot above does not cover. Protect that tree IN ADDITION -- never
-    # instead: a compound line can lose data on both sides
-    # (`rm notes && git worktree remove ../wt`), so replacing the current repo
-    # here would trade one gap for another.
-    if wt="$(_gsp_worktree_remove_target "$cmd")" && [[ -n "$wt" ]]; then
-      wtop="$(git -C "$wt" rev-parse --show-toplevel 2>/dev/null)"
-      if [[ -n "$wtop" && "$wtop" != "$repo" ]]; then
-        python3 "$GIT_SAFEPOINT_PY" --repo "$wtop" snapshot \
-          --via preexec --label "pre-shell: ${cmd}" --quiet
-        snap_status=$?
-        if (( snap_status == 1 || snap_status == 2 )); then
-          print -u2 -r -- "warning: git-safepoint failed for worktree '$wtop'; NO protective snapshot was taken"
-        fi
+    repos=("${(@0)repo_bytes}")
+    for repo in "${repos[@]}"; do
+      [[ -n "$repo" ]] || continue
+      # Status 1 or 2 means this tree was not protected, so report every
+      # occurrence; status 3 means an existing snapshot already covers it and is
+      # silent like 0. Continue after a failure so one repo cannot starve another.
+      python3 "$GIT_SAFEPOINT_PY" --repo "$repo" snapshot \
+        --via preexec --label "pre-shell: ${cmd}" --quiet
+      snap_status=$?
+      if (( snap_status == 1 || snap_status == 2 )); then
+        print -u2 -r -- "warning: git-safepoint failed for '$repo'; NO protective snapshot was taken"
       fi
-    fi
+    done
   fi
   return 0  # never block the command
 }

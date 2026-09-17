@@ -339,7 +339,11 @@ def _git_toplevel(path: str) -> "str | None":
     while p and p != os.path.dirname(p):
         r = gitutil.run_git(p, ["rev-parse", "--show-toplevel"], check=False)
         if r.returncode == 0:
-            return r.stdout.decode("utf-8", "surrogateescape").strip()
+            # rev-parse appends exactly one record-ending LF. Remove only that
+            # delimiter: strip()/rstrip() also remove whitespace that may be a
+            # real part of a valid POSIX work-tree name.
+            raw = r.stdout[:-1] if r.stdout.endswith(b"\n") else r.stdout
+            return raw.decode("utf-8", "surrogateescape")
         p = os.path.dirname(p)
     return None
 
@@ -362,7 +366,7 @@ def _repos_from_command(command: str, cwd: str) -> "list[str]":
     ``rm -rf subrepo`` still finds a NESTED repo while file / flag-operand
     arguments stay free -- catching that case without forking ``git rev-parse``
     once per argument. The walk count is also capped
-    (the cwd fallback still protects the primary repo); a destructive command
+    (the starting-cwd lookup still protects the primary repo); a destructive command
     touching >64 distinct nested-repo paths is not a realistic shape.
     """
     seen: "list[str]" = []
@@ -373,6 +377,12 @@ def _repos_from_command(command: str, cwd: str) -> "list[str]":
         if root and root not in seen_set:
             seen_set.add(root)
             seen.append(root)
+
+    # Capture the starting work tree first. For `git worktree remove <target>`,
+    # linked work trees share the snapshots ref namespace; leaving the doomed
+    # target until last keeps its recovery snapshot newest, matching the zsh
+    # adapter's established behaviour.
+    _add(_git_toplevel(cwd))
 
     try:
         tokens = shlex.split(command, posix=True)
@@ -417,9 +427,6 @@ def _repos_from_command(command: str, cwd: str) -> "list[str]":
             scanned.add(key)
             _add(_git_toplevel(key))
 
-    # Fallback: walk up from cwd (covers bare-name targets like ``rm -rf notes``).
-    _add(_git_toplevel(cwd))
-
     return seen
 
 
@@ -442,6 +449,30 @@ def _repos_from_file_path(file_path: str, cwd: str) -> "list[str]":
     return seen
 
 
+def cmd_resolve_command_repos(cwd: str, args: argparse.Namespace) -> int:
+    """Internal adapter bridge: emit command target repos, NUL-separated.
+
+    Keeping path discovery here makes the zsh preexec adapter use the exact same
+    quoting, relative-path, nested-repo, and git-environment handling as the
+    PreToolUse hook.  NUL separation preserves every valid POSIX path byte except
+    NUL itself (which cannot occur in a path).
+    """
+    roots = _repos_from_command(args.command, cwd)
+    # Terminate every record, including the last. Besides making this an
+    # ordinary NUL-delimited stream, the final NUL prevents zsh's command
+    # substitution from stripping newlines that are part of the last root's
+    # name.
+    payload = b"".join(os.fsencode(root) + b"\0" for root in roots)
+    binary_stdout = getattr(sys.stdout, "buffer", None)
+    if binary_stdout is not None:
+        binary_stdout.write(payload)
+        binary_stdout.flush()
+    else:
+        # Tests or embedders may replace stdout with StringIO.
+        sys.stdout.write(payload.decode(sys.getfilesystemencoding(), "surrogateescape"))
+    return 0
+
+
 def cmd_hook(repo: str, args: argparse.Namespace) -> int:
     """Read PreToolUse JSON on stdin; snapshot before Bash/Write/Edit tool calls.
 
@@ -461,6 +492,12 @@ def cmd_hook(repo: str, args: argparse.Namespace) -> int:
     writes within one tick; force-rehashing the whole repo on every editor call
     is too costly to pay by default to close that last sliver.
     """
+    resolve_command = getattr(args, "resolve_command_repos", None)
+    if resolve_command is not None:
+        return cmd_resolve_command_repos(
+            repo, argparse.Namespace(command=resolve_command)
+        )
+
     # Read + parse stdin inside the guard: a None/closed/erroring stdin must not
     # escape and break the always-exit-0 contract.
     try:
@@ -689,7 +726,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_prune.add_argument("--dry-run", action="store_true")
     p_prune.add_argument("--no-gc", action="store_true", help="drop refs but skip gc")
 
-    sub.add_parser("hook", help="PreToolUse hook entry (reads JSON on stdin)")
+    p_hook = sub.add_parser("hook", help="PreToolUse hook entry (reads JSON on stdin)")
+    p_hook.add_argument(
+        "--_resolve-command-repos",
+        dest="resolve_command_repos",
+        metavar="COMMAND",
+        help=argparse.SUPPRESS,
+    )
 
     return parser
 
@@ -711,7 +754,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     args = parser.parse_args(argv)
     repo = os.path.abspath(args.repo)
 
-    # `hook` resolves its own repo from the JSON cwd, so don't gate it here.
+    # `hook` resolves its own repo from the JSON cwd. Its internal preexec bridge
+    # treats --repo as the command cwd and may intentionally be invoked outside a
+    # work tree, so don't gate it here.
     if args.cmd != "hook":
         if not gitutil.is_work_tree(repo):
             print("not a git work tree: {0}".format(repo), file=sys.stderr)

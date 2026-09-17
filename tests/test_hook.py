@@ -380,7 +380,14 @@ class ZshPreexecTest(unittest.TestCase):
         repo = helpers.make_repo()
         self.addCleanup(helpers.cleanup, repo)
         stub = helpers.write_file(
-            repo, "fake_safepoint.py", "raise SystemExit(3)\n"
+            repo,
+            "fake_safepoint.py",
+            "import os\n"
+            "import sys\n"
+            "if '--_resolve-command-repos' in sys.argv:\n"
+            "    sys.stdout.buffer.write(os.fsencode(sys.argv[sys.argv.index('--repo') + 1]))\n"
+            "    raise SystemExit(0)\n"
+            "raise SystemExit(3)\n",
         )
 
         proc = self._run_preexec(repo, "rm -rf notes", stub)
@@ -402,6 +409,11 @@ class ZshPreexecTest(unittest.TestCase):
             "fake_safepoint.py",
             "import os\n"
             "import sys\n"
+            "if '--_resolve-command-repos' in sys.argv:\n"
+            "    cwd = sys.argv[sys.argv.index('--repo') + 1]\n"
+            "    target = os.environ['FAIL_REPO']\n"
+            "    sys.stdout.buffer.write(os.fsencode(target) + b'\\0' + os.fsencode(cwd))\n"
+            "    raise SystemExit(0)\n"
             "repo = sys.argv[sys.argv.index('--repo') + 1]\n"
             "raise SystemExit(1 if os.path.realpath(repo) == "
             "os.path.realpath(os.environ['FAIL_REPO']) else 0)\n",
@@ -414,6 +426,92 @@ class ZshPreexecTest(unittest.TestCase):
         self.assertEqual(proc.returncode, 0)
         self.assertEqual(proc.stderr.count(b"NO protective snapshot was taken"), 1)
         self.assertIn(os.fsencode(worktree), proc.stderr)
+
+    def test_worktree_remove_keeps_target_snapshot_newest(self):
+        repo = helpers.make_repo()
+        self.addCleanup(helpers.cleanup, repo)
+        helpers.write_file(repo, "tracked.txt", "tracked")
+        helpers.git(repo, "add", "tracked.txt")
+        helpers.git(repo, "commit", "-qm", "initial")
+        worktree = repo + "-linked"
+        self.addCleanup(helpers.cleanup, worktree)
+        helpers.git(repo, "worktree", "add", "-q", "-b", "linked", worktree)
+        helpers.write_file(repo, "current-only.txt", "current work")
+        helpers.write_file(worktree, "target-only.txt", "target work")
+
+        proc = self._run_preexec(
+            repo,
+            "git worktree remove {0}".format(worktree),
+            os.path.join(helpers.PKG_ROOT, "git_safepoint.py"),
+        )
+
+        self.assertEqual(proc.returncode, 0, proc.stderr.decode("utf-8", "replace"))
+        refs = engine.list_refs(repo)
+        self.assertEqual(len(refs), 2)
+        newest_names = helpers.git(
+            repo, "ls-tree", "-r", "--name-only", "-z", refs[0][1]
+        ).stdout.split(b"\0")
+        self.assertIn(b"target-only.txt", newest_names)
+        self.assertNotIn(b"current-only.txt", newest_names)
+
+    def test_nonrepo_cwd_snapshots_absolute_target_repo(self):
+        repo = helpers.make_repo()
+        self.addCleanup(helpers.cleanup, repo)
+        helpers.write_file(repo, "untracked.txt", "important")
+        nonrepo = tempfile.mkdtemp(prefix="git-safepoint-nonrepo-")
+        self.addCleanup(helpers.cleanup, nonrepo)
+
+        proc = self._run_preexec(
+            nonrepo,
+            "rm -f {0}".format(os.path.join(repo, "untracked.txt")),
+            os.path.join(helpers.PKG_ROOT, "git_safepoint.py"),
+        )
+
+        self.assertEqual(proc.returncode, 0, proc.stderr.decode("utf-8", "replace"))
+        self.assertEqual(len(engine.list_refs(repo)), 1)
+
+    def test_nonrepo_cwd_preserves_target_repo_with_trailing_newline(self):
+        base = tempfile.mkdtemp(prefix="git-safepoint-path-edge-")
+        self.addCleanup(helpers.cleanup, base)
+        repo = os.path.join(base, "target\n")
+        os.mkdir(repo)
+        helpers.git(repo, "-c", "init.defaultBranch=main", "init", "-q")
+        helpers.git(repo, "config", "user.email", "test@local")
+        helpers.git(repo, "config", "user.name", "test")
+        helpers.write_file(repo, "untracked.txt", "important")
+        nonrepo = tempfile.mkdtemp(prefix="git-safepoint-nonrepo-")
+        self.addCleanup(helpers.cleanup, nonrepo)
+
+        # The resolver's final root ends in a literal newline. A trailing NUL in
+        # its output must protect that byte from zsh command substitution, which
+        # otherwise strips trailing newlines before the adapter can split paths.
+        cmd = 'rm -f "{0}"'.format(os.path.join(repo, "untracked.txt"))
+        proc = self._run_preexec(
+            nonrepo,
+            cmd,
+            os.path.join(helpers.PKG_ROOT, "git_safepoint.py"),
+        )
+
+        self.assertEqual(proc.returncode, 0, proc.stderr.decode("utf-8", "replace"))
+        self.assertEqual(len(engine.list_refs(repo)), 1)
+
+    def test_other_repo_cwd_snapshots_both_target_and_cwd_repos(self):
+        cwd_repo = helpers.make_repo()
+        target_repo = helpers.make_repo()
+        self.addCleanup(helpers.cleanup, cwd_repo)
+        self.addCleanup(helpers.cleanup, target_repo)
+        helpers.write_file(cwd_repo, "local.txt", "local work")
+        helpers.write_file(target_repo, "target.txt", "target work")
+
+        proc = self._run_preexec(
+            cwd_repo,
+            "rm -f {0}".format(os.path.join(target_repo, "target.txt")),
+            os.path.join(helpers.PKG_ROOT, "git_safepoint.py"),
+        )
+
+        self.assertEqual(proc.returncode, 0, proc.stderr.decode("utf-8", "replace"))
+        self.assertEqual(len(engine.list_refs(target_repo)), 1)
+        self.assertEqual(len(engine.list_refs(cwd_repo)), 1)
 
     def test_destructive_cases_fire(self):
         for c in ("rm -rf x", "git reset --hard", "gzip f", "foo > out",

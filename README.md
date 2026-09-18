@@ -303,7 +303,7 @@ pruned.
 
 ```sh
 python3 -m unittest discover -s tests -p 'test_*.py'
-# → 339 tests pass (macOS / Linux; 2 non-UTF-8-name tests skip on macOS)
+# → 374 tests pass (macOS / Linux; 2 non-UTF-8-name tests skip on macOS)
 ```
 
 ---

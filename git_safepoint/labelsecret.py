@@ -81,6 +81,16 @@ _KV_RE = re.compile(
 # quadratic-rescan reason as _KV_RE; no real URI scheme is longer.
 _URL_CRED_RE = re.compile(r"([a-zA-Z][a-zA-Z0-9+.-]{0,15}://[^\s:@/]*:)([^\s@/]+)(@)")
 
+# A webhook URL carries its credential in the PATH, so the key=value, user:pass and Bearer
+# rules all miss it -- yet anyone holding the URL can post as you. Keep the host and the fixed
+# prefix (the label still says where the command posted) and mask the rest. Match on the
+# host+path, not on `https://`: the same URL appears scheme-less, as `http://` and with
+# an explicit `:443`.
+_WEBHOOK_URL_RE = re.compile(
+    r"(?i)(\b(?:hooks\.slack\.com(?::\d+)?/services|discord(?:app)?\.com(?::\d+)?/api/webhooks|"
+    r"outlook\.office(?:365)?\.com(?::\d+)?/webhook|chat\.googleapis\.com(?::\d+)?/v1/spaces)/)"
+    r"[^\s\"'<>|;&]+")
+
 # Bare ``Bearer <token>`` outside a header.
 _BEARER_RE = re.compile(r"(?i)(Bearer\s+)([A-Za-z0-9._~+/-]{12,}=*)")
 
@@ -153,6 +163,7 @@ def redact_label(text: str) -> str:
         out = pattern.sub(lambda m: m.group(1) + MASK, out)
     out = _KV_RE.sub(_kv_sub, out)
     out = _URL_CRED_RE.sub(lambda m: m.group(1) + MASK + m.group(3), out)
+    out = _WEBHOOK_URL_RE.sub(lambda m: m.group(1) + MASK, out)
     out = _BEARER_RE.sub(lambda m: m.group(1) + MASK, out)
     for pattern in _TOKEN_SHAPE_RES:
         out = pattern.sub(MASK, out)

@@ -85,6 +85,36 @@ class TestRedactLabel(unittest.TestCase):
         self.assertEqual(msg, "snapshot 20260101-000000-0001-00001 via=manual")
 
 
+def test_webhook_url_credential_is_masked():
+    # The credential sits in the path, so the key=value / user:pass / Bearer rules all miss it.
+    for url, leak, keep in [
+        # Short segments on purpose: a realistically shaped webhook trips GitHub push
+        # protection even inside a test fixture.
+        ("curl -X POST https://hooks.slack.com/services/T0/B0/TOKEN123",
+         "TOKEN123", "hooks.slack.com/services/"),
+        ("curl https://discord.com/api/webhooks/123456789/AbCdEfGhIjKlMnOpQrStUvWxYz",
+         "AbCdEfGhIjKlMnOpQrStUvWxYz", "discord.com/api/webhooks/"),
+    ]:
+        out = redact_label(url)
+        assert leak not in out, out
+        assert keep in out, out
+
+
+def test_webhook_without_scheme_or_with_port_is_masked():
+    # The same URL appears scheme-less in logs, as http://, and with an explicit :443.
+    for text in ("posted to hooks.slack.com/services/T0/B0/XXXXXXXXXXXX",
+                 "curl http://hooks.slack.com/services/T0/B0/XXXXXXXXXXXX",
+                 "curl https://hooks.slack.com:443/services/T0/B0/XXXXXXXXXXXX"):
+        out = redact_label(text)
+        assert "XXXXXXXXXXXX" not in out, out
+        assert MASK in out, out
+
+
+def test_ordinary_url_is_left_alone():
+    plain = "curl https://api.github.com/repos/o/r/issues"
+    assert redact_label(plain) == plain
+
+
 class TestRedactLabelIsBounded(unittest.TestCase):
     """The pre-Bash hook passes the WHOLE command as the label, so redact_label
     must stay fast on huge input -- a stalled hook means NO protective snapshot

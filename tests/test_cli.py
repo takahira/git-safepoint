@@ -149,6 +149,81 @@ class CliTest(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertIn("f.txt", out)
 
+    def test_diff_cli_with_force_tracked_file_under_ignored_dir(self):
+        # Regression: the temp-index ``git add -A --pathspec-from-file`` failed
+        # rc=1 ("paths are ignored by one of your .gitignore files") whenever the
+        # pathspec held a path under an ignored directory -- here a file
+        # force-tracked under ``vendor/`` -- and was misreported as "needs
+        # git >= 2.25", breaking ``diff <id>`` and ``restore --interactive``.
+        helpers.write_file(self.repo, ".gitignore", "vendor/\n")
+        helpers.write_file(self.repo, "vendor/lib.js", "lib\n")
+        helpers.write_file(self.repo, "a.txt", "a\n")
+        helpers.git(self.repo, "add", ".gitignore", "a.txt")
+        helpers.git(self.repo, "add", "-f", "vendor/lib.js")
+        helpers.git(self.repo, "commit", "-qm", "init")
+        helpers.write_file(self.repo, "a.txt", "a\nedit\n")
+        rc, _, err = run_cli(["--repo", self.repo, "snapshot", "--force"])
+        self.assertEqual(rc, 0, err)
+        rc, out, _ = run_cli(["--repo", self.repo, "list", "--json"])
+        sid = json.loads(out.strip().splitlines()[0])["id"]
+        helpers.write_file(self.repo, "a.txt", "changed again\n")
+        rc, out, err = run_cli(["--repo", self.repo, "diff", sid])
+        self.assertEqual(rc, 0, err)
+        self.assertIn("M\ta.txt", out)
+        self.assertNotIn("vendor/lib.js", out)
+
+    def test_diff_cli_snapshot_file_now_directory_hashes_no_ignored_secret(self):
+        # ``add -f`` on a path that is now a DIRECTORY would sweep in ignored
+        # secrets beneath it; the path is dropped from the temp index instead.
+        helpers.write_file(self.repo, ".gitignore", "*.key\n")
+        helpers.write_file(self.repo, "x", "file\n")
+        run_cli(["--repo", self.repo, "snapshot", "--force"])
+        rc, out, _ = run_cli(["--repo", self.repo, "list", "--json"])
+        sid = json.loads(out.strip().splitlines()[0])["id"]
+        os.unlink(os.path.join(self.repo, "x"))
+        helpers.write_file(self.repo, "x/new.txt", "n\n")
+        helpers.write_file(self.repo, "x/secret.key", "TOPSECRET-dirswap\n")
+        rc, out, err = run_cli(["--repo", self.repo, "diff", sid])
+        self.assertEqual(rc, 0, err)
+        self.assertIn("D\tx", out)
+        self.assertIn("A\tx/new.txt", out)
+        self.assertNotIn("secret.key", out)
+        blob = helpers.git(
+            self.repo, "hash-object", "--stdin",
+            input_bytes=b"TOPSECRET-dirswap\n",
+        ).stdout.decode().strip()
+        probe = helpers.git(self.repo, "cat-file", "-e", blob, check=False)
+        self.assertNotEqual(probe.returncode, 0, "secret blob was hashed")
+
+    def test_diff_cli_untouched_submodule_not_reported_deleted(self):
+        # Regression: a submodule is a directory in the work tree, so the
+        # "snapshot path is now a directory" drop removed its gitlink from the
+        # temp index and an untouched submodule showed as ``D sub``.
+        sub_src = helpers.make_repo()
+        try:
+            helpers.write_file(sub_src, "lib.txt", "submodule content\n")
+            helpers.git(sub_src, "add", "-A")
+            helpers.git(sub_src, "commit", "-q", "-m", "sub init")
+            helpers.write_file(self.repo, "main.txt", "super\n")
+            helpers.git(
+                self.repo, "-c", "protocol.file.allow=always", "submodule",
+                "add", sub_src, "sub",
+            )
+            helpers.git(self.repo, "add", "-A")
+            helpers.git(self.repo, "commit", "-qm", "with submodule")
+            helpers.write_file(self.repo, "main.txt", "super edited\n")
+            rc, _, err = run_cli(["--repo", self.repo, "snapshot", "--force"])
+            self.assertEqual(rc, 0, err)
+            rc, out, _ = run_cli(["--repo", self.repo, "list", "--json"])
+            sid = json.loads(out.strip().splitlines()[0])["id"]
+            helpers.write_file(self.repo, "main.txt", "super edited twice\n")
+            rc, out, err = run_cli(["--repo", self.repo, "diff", sid])
+            self.assertEqual(rc, 0, err)
+            self.assertIn("M\tmain.txt", out)
+            self.assertNotIn("sub", out.replace("main.txt", ""))
+        finally:
+            helpers.cleanup(sub_src)
+
     def test_restore_interactive_non_tty_rejected(self):
         # `restore --interactive` is a TTY-only flow. In the test
         # harness stdin/stdout are redirected (not a TTY), so it must refuse

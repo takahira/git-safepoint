@@ -270,7 +270,7 @@ Control-flow / compound bodies *are* detected (`if …; then rm …; fi`, `for/w
 
 **Capture is not a point-in-time snapshot.** Files are stat'd and then hashed in separate steps, and the per-repo lock only excludes other git-safepoint processes — not your editor or build. If an external writer changes a file *during* a capture, that file may be stored with a slightly torn view (new bytes against the pre-write mode); it is never corrupt git data, and the next capture re-hashes it. Submodules record only their pinned commit (the pin is restored manually, not the submodule work tree); in **conservative** mode a submodule-only HEAD change (no change to the superproject's own files) is skipped before any tree is built, so the pin is captured best-effort there — a destructive command still force-captures the live pin.
 
-**Reserved work-tree names.** git-safepoint never captures its own restore artifacts: the `.snap-bak/` directory (pre-overwrite backups) and any path ending in `.snap-restore-tmp` (in-flight restore temp files). A user file that happens to use those names is excluded from snapshots — avoid them.
+**Reserved work-tree names.** git-safepoint never captures its own restore artifacts: the `.snap-bak/` directory (pre-overwrite backups) and any path ending in `.snap-restore-tmp` (in-flight restore temp files). A user file that happens to use those names is excluded from snapshots — avoid them. Because `.snap-bak/` is never snapshotted, git-safepoint writes a `.snap-bak/.gitignore` containing `*` so the backups are skipped by `git add -A` (a backed-up `.env` is never staged) and survive `git clean -fd`; `git clean -fdx` still removes them, like any other ignored file — copy out anything you need first.
 
 **Concurrency / `.git` on a network filesystem.** The per-repo lock uses
 `fcntl.flock`, which is reliable on a local filesystem. On some NFS mounts
@@ -303,7 +303,7 @@ pruned.
 
 ```sh
 python3 -m unittest discover -s tests -p 'test_*.py'
-# → 374 tests pass (macOS / Linux; 2 non-UTF-8-name tests skip on macOS)
+# → 380 tests pass (macOS / Linux; 2 non-UTF-8-name tests skip on macOS)
 ```
 
 ---

@@ -210,6 +210,74 @@ class RestoreBackupSurfacingTest(unittest.TestCase):
             helpers.cleanup(repo)
 
 
+class SnapBakProtectedFromGitTest(unittest.TestCase):
+    """Regression: ``.snap-bak/`` holds the ONLY copy of overwritten content, so
+    it must survive ``git clean -fd`` and never be staged by ``git add -A``
+    (a backed-up ``.env`` would otherwise be committable)."""
+
+    def test_backups_survive_git_clean_and_are_not_staged(self):
+        repo = helpers.make_repo()
+        try:
+            helpers.write_file(repo, "notes.txt", "v1")
+            # Root-anchored ignore: does NOT cover .snap-bak/.env.
+            helpers.write_file(repo, ".gitignore", "/.env\n")
+            helpers.write_file(repo, ".env", "SECRET=v1\n")
+            helpers.git(repo, "add", "notes.txt", ".gitignore")
+            helpers.git(repo, "commit", "-qm", "base")
+            engine.capture(repo, via="manual", force=True, debounce=0)
+            sid = engine.list_refs(repo)[0][0]
+            helpers.write_file(repo, "notes.txt", "v2 important unsnapshotted")
+            status, msg = engine.restore_file(repo, sid, "notes.txt")
+            self.assertEqual(status, 0, msg)
+            bak_rel = gitutil.SNAP_BAK_DIR + "/notes.txt"
+            # Plant a secret-shaped backup the way a restore of .env would.
+            helpers.write_file(repo, gitutil.SNAP_BAK_DIR + "/.env", "SECRET=v0\n")
+
+            helpers.git(repo, "clean", "-fd")
+            self.assertEqual(helpers.read_file(repo, bak_rel),
+                             b"v2 important unsnapshotted")
+
+            helpers.git(repo, "add", "-A")
+            staged = helpers.git(
+                repo, "diff", "--cached", "--name-only"
+            ).stdout.decode()
+            self.assertNotIn(gitutil.SNAP_BAK_DIR, staged)
+        finally:
+            helpers.cleanup(repo)
+
+
+class SnapBakLegacyGitignoreBackupTest(unittest.TestCase):
+    """An older version backed up the user's root ``.gitignore`` to
+    ``.snap-bak/.gitignore``; it must not be mistaken for the marker (which
+    left ``.snap-bak`` unprotected) nor be lost when the marker is written."""
+
+    def test_legacy_gitignore_backup_moved_aside_and_marker_written(self):
+        repo = helpers.make_repo()
+        try:
+            helpers.write_file(repo, "f.txt", "v1")
+            engine.capture(repo, via="manual", force=True, debounce=0)
+            sid = engine.list_refs(repo)[0][0]
+            legacy = gitutil.SNAP_BAK_DIR + "/.gitignore"
+            helpers.write_file(repo, legacy, "node_modules/\n")
+            helpers.write_file(repo, gitutil.SNAP_BAK_DIR + "/old.txt", "only copy")
+            helpers.write_file(repo, "f.txt", "v2")
+            status, msg = engine.restore_file(repo, sid, "f.txt")
+            self.assertEqual(status, 0, msg)
+            self.assertEqual(
+                helpers.read_file(repo, legacy + ".1"), b"node_modules/\n"
+            )
+            dry = helpers.git(repo, "clean", "-fdn").stdout.decode()
+            self.assertNotIn(gitutil.SNAP_BAK_DIR, dry)
+            # Idempotent: a second backup keeps the marker and moves nothing.
+            helpers.write_file(repo, "f.txt", "v3")
+            status, msg = engine.restore_file(repo, sid, "f.txt")
+            self.assertEqual(status, 0, msg)
+            self.assertFalse(os.path.lexists(
+                os.path.join(repo, legacy + ".2")))
+        finally:
+            helpers.cleanup(repo)
+
+
 class RestoreUxTest(unittest.TestCase):
     def setUp(self):
         self.repo = helpers.make_repo()
@@ -271,6 +339,37 @@ class DiffOldGitTest(unittest.TestCase):
             gitutil.run_git = orig
         self.assertEqual(status, 2, text)
         self.assertIn("2.25", text)
+
+
+    def test_update_index_failure_has_no_git_version_hint(self):
+        # The git >= 2.25 hint belongs to ``add --pathspec-file-nul`` only; an
+        # ``update-index`` failure must surface git's stderr without it.
+        repo = helpers.make_repo()
+        self.addCleanup(helpers.cleanup, repo)
+        helpers.write_file(repo, "x", "file")
+        engine.capture(repo, force=True)
+        sid = engine.list_refs(repo)[0][0]
+        os.remove(os.path.join(repo, "x"))
+        helpers.write_file(repo, "x/new.txt", "n")  # snapshot file -> dir
+
+        orig = gitutil.run_git
+
+        def fake(repo_, args, **kw):
+            if args[:1] == ["update-index"]:
+                return subprocess.CompletedProcess(
+                    args, 128, stdout=b"", stderr=b"fatal: simulated failure",
+                )
+            return orig(repo_, args, **kw)
+
+        gitutil.run_git = fake
+        try:
+            status, text = engine.diff_name_status(repo, sid, None)
+        finally:
+            gitutil.run_git = orig
+        self.assertEqual(status, 2, text)
+        self.assertIn("update-index", text)
+        self.assertIn("simulated failure", text)
+        self.assertNotIn("2.25", text)
 
 
 # --- list survives a ref pruned concurrently mid-listing -------------

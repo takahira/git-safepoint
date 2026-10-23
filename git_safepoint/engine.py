@@ -1146,6 +1146,46 @@ def diff_name_status(
     return 0, out
 
 
+def _run_temp_index_cmd(
+    repo: str, args: List[str], env: dict, paths: List[str]
+) -> None:
+    """Feed NUL-separated ``paths`` on stdin to a temp-index git command.
+
+    A failure must be loud: if the add fails the temp index stays equal to
+    ``read-tree <ref>`` and the diff would falsely report ZERO differences -- a
+    silent "nothing changed" during recovery. git's own stderr is surfaced
+    rather than guessed at; the git >= 2.25 hint is added only for commands that
+    actually use ``--pathspec-file-nul``.
+    """
+    payload = b"\x00".join(
+        p.encode("utf-8", "surrogateescape") for p in paths
+    ) + b"\x00"
+    proc = gitutil.run_git(
+        repo, args, extra_env=env, input_bytes=payload, check=False
+    )
+    if proc.returncode != 0:
+        hint = (
+            "; --pathspec-file-nul needs git >= 2.25"
+            if "--pathspec-file-nul" in args else ""
+        )
+        raise RuntimeError(
+            "snapshot-vs-work-tree diff failed (git {0}{1}): {2}".format(
+                args[0], hint, proc.stderr.decode("utf-8", "replace").strip()
+            )
+        )
+
+
+def _index_gitlinks(repo: str) -> set:
+    """Paths recorded as submodule gitlinks (mode 160000) in the real index."""
+    raw = gitutil.run_git(repo, ["ls-files", "-s", "-z"]).stdout
+    links = set()
+    for record in raw.split(b"\x00"):
+        meta, sep, path_b = record.partition(b"\t")
+        if sep and meta.startswith(b"160000 "):
+            links.add(path_b.decode("utf-8", "surrogateescape"))
+    return links
+
+
 def _diff_against_worktree(repo: str, ref: str) -> str:
     """name-status of a snapshot tree vs the live work tree.
 
@@ -1183,29 +1223,41 @@ def _diff_against_worktree(repo: str, ref: str) -> str:
                 continue
             seen.add(rel)
             pathspec.append(rel)
-        if pathspec:
-            payload = b"\x00".join(
-                p.encode("utf-8", "surrogateescape") for p in pathspec
-            ) + b"\x00"
-            added = gitutil.run_git(
-                repo,
-                ["add", "-A", "--pathspec-from-file=-", "--pathspec-file-nul"],
-                extra_env=env,
-                input_bytes=payload,
-                check=False,
+        # ``-f``: every path here is already vetted by the capture model, but a
+        # vetted path under an IGNORED directory (a force-tracked ``vendor/x``,
+        # an ``--include-ignored output/`` capture) makes plain ``git add`` fail
+        # rc=1 ("paths are ignored by one of your .gitignore files"). ``-f`` on a
+        # DIRECTORY would however sweep in everything beneath it (ignored
+        # secrets included), so a snapshot file that has since become a
+        # directory is dropped from the temp index instead of re-added; the
+        # vetted files beneath it are already in the pathspec themselves.
+        # Submodules are directories too, but ``git add`` records them as a
+        # gitlink without descending, so they stay in the add (dropping them
+        # showed an untouched submodule as ``D sub``). Gitlinks are taken from
+        # git's own records (snapshot tree + real index, mode 160000), never
+        # from the work tree (a planted ``x/.git`` must not exempt ``x``).
+        gitlinks = {rel for rel, _sha in _gitlinks_under(repo, ref, "")}
+        gitlinks |= _index_gitlinks(repo)
+        now_dirs = [
+            rel for rel in pathspec
+            if rel not in gitlinks
+            and os.path.isdir(os.path.join(repo, rel))
+            and not os.path.islink(os.path.join(repo, rel))
+        ]
+        if now_dirs:
+            now_dir_set = set(now_dirs)
+            pathspec = [rel for rel in pathspec if rel not in now_dir_set]
+            _run_temp_index_cmd(
+                repo, ["update-index", "--force-remove", "-z", "--stdin"],
+                env, now_dirs,
             )
-            if added.returncode != 0:
-                # ``git add --pathspec-from-file``/``--pathspec-file-nul`` need git
-                # >= 2.25. On older git the add fails and the temp index stays equal
-                # to ``read-tree <ref>``, so the diff below would falsely report
-                # ZERO differences -- a silent "nothing changed" during recovery.
-                # Surface it loudly instead of swallowing it.
-                raise RuntimeError(
-                    "snapshot-vs-work-tree diff needs git >= 2.25 "
-                    "(git add --pathspec-file-nul failed): {0}".format(
-                        added.stderr.decode("utf-8", "replace").strip()
-                    )
-                )
+        if pathspec:
+            _run_temp_index_cmd(
+                repo,
+                ["add", "-A", "-f", "--pathspec-from-file=-",
+                 "--pathspec-file-nul"],
+                env, pathspec,
+            )
         proc = gitutil.run_git(
             repo,
             ["diff", "--cached", "--name-status", ref],
@@ -1393,6 +1445,54 @@ def _snap_bak_unsafe(repo: str) -> Optional[str]:
     return None
 
 
+_SNAP_BAK_MARKER = (
+    b"# git-safepoint restore backups: keep out of git add/clean\n*\n"
+)
+
+
+def _is_snap_bak_marker(path: str) -> bool:
+    """True iff ``path`` is a regular file holding exactly our marker."""
+    try:
+        st = os.lstat(path)
+    except FileNotFoundError:
+        return False
+    if not stat.S_ISREG(st.st_mode) or st.st_size != len(_SNAP_BAK_MARKER):
+        return False
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    with os.fdopen(fd, "rb") as fh:
+        return fh.read(len(_SNAP_BAK_MARKER) + 1) == _SNAP_BAK_MARKER
+
+
+def _ensure_snap_bak_ignored(bak_root: str) -> None:
+    """Make ``.snap-bak/.gitignore`` our ``*`` marker (idempotent).
+
+    A backup is the ONLY copy of what a restore overwrote, yet ``.snap-bak`` is
+    never captured. Left untracked-and-unignored it was deleted by the very
+    ``git clean -fd`` this tool guards against, and ``git add -A`` staged it --
+    committing e.g. a backed-up ``.env`` that a root-anchored ``/.env`` ignore
+    does not cover. A self-ignoring directory is skipped by both (``-x`` still
+    removes it, as it removes every ignored file).
+
+    Something else already at that name -- typically an older version's backup
+    of the user's root ``.gitignore`` -- is itself a backup, so it is renamed
+    (never followed: ``rename`` moves a symlink, not its target) to the next
+    free ``.gitignore.N`` before the marker is created with
+    ``O_EXCL|O_NOFOLLOW``, which never follows or overwrites a planted file.
+    """
+    marker = os.path.join(bak_root, ".gitignore")
+    if _is_snap_bak_marker(marker):
+        return
+    if os.path.lexists(marker):
+        os.rename(marker, _unique_backup_path(marker))
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(marker, flags, 0o600)
+    except FileExistsError:
+        return  # a concurrent restore wrote it first
+    with os.fdopen(fd, "wb") as fh:
+        fh.write(_SNAP_BAK_MARKER)
+
+
 def _backup_existing(repo: str, rel: str, no_backup: bool) -> Optional[str]:
     """Stash the current file to ``.snap-bak/<rel>`` before overwrite.
 
@@ -1421,6 +1521,9 @@ def _backup_existing(repo: str, rel: str, no_backup: bool) -> Optional[str]:
     os.makedirs(bak_root, mode=0o700, exist_ok=True)
     with contextlib.suppress(OSError):
         os.chmod(bak_root, 0o700)
+    # Written BEFORE the backup path is picked, so a backup of the user's root
+    # ``.gitignore`` lands at ``.gitignore.1`` instead of displacing the marker.
+    _ensure_snap_bak_ignored(bak_root)
     parent = os.path.dirname(bak_path)
     if parent and parent != bak_root:
         os.makedirs(parent, mode=0o700, exist_ok=True)
